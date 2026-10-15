@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rebot-rt"
+version = "0.1.0"
+description = "C++ 100 Hz B601 Cartesian control for DM and RS motors"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["rebot_rt*"]
+
+[tool.setuptools]
+include-package-data = false
+

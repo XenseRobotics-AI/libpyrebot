@@ -1,0 +1,3 @@
+build/
+*.egg-info/
+rebot_rt/_native*.so

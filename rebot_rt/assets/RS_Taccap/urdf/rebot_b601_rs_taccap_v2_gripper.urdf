@@ -1,0 +1,406 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="rebot_b601_rs_taccap">
+  <!-- Exported by rebot_mass on 2026-10-13 16:49. Template: rebot_b601_rs_taccap.urdf. Identified arm: rebot_b601_rs_identified_v2.urdf (link1, link2, link3, link4, link5, link6); payload gripper 0.692 kg on link6. Joint torque offsets are not in URDF: see the _offset.yaml file. -->
+  <link name="world" />
+  <material name="rs_base_black">
+    <color rgba="0.055 0.065 0.060 1" />
+  </material>
+  <material name="rs_motor_black">
+    <color rgba="0.045 0.052 0.049 1" />
+  </material>
+  <material name="rs_pla_black">
+    <color rgba="0.090 0.106 0.102 1" />
+  </material>
+  <material name="rs_wordmark_black">
+    <color rgba="0.010 0.012 0.011 1" />
+  </material>
+  <material name="rs_anodized_silver">
+    <color rgba="0.720 0.760 0.730 1" />
+  </material>
+  <material name="rs_seeed_green">
+    <color rgba="0.725 0.835 0.118 1" />
+  </material>
+  <link name="base_link">
+    <inertial>
+      <origin xyz="2.87641888266442E-06 -0.000122302488725115 0.0243376121934547" rpy="0 0 0" />
+      <mass value="1.1774" />
+      <inertia ixx="0.00133040" ixy="0.00000001" ixz="0.00000000" iyy="0.00213119" iyz="0.00000000" izz="0.00275877" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/base_link.STL" />
+      </geometry>
+      <material name="rs_base_black" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <origin xyz="0.008176522803 0.001225842119 0.0331419659" rpy="0 0 0" />
+      <mass value="0.4655" />
+      <inertia ixx="0.00025207" ixy="0" ixz="-2.832e-05" iyy="0.00015464" iyz="0" izz="0.00023416" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link1.STL" />
+      </geometry>
+      <material name="rs_anodized_silver" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <origin xyz="-0.00034283 -0.00098683 0.075" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="link1" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-2.8" upper="2.8" effort="36" velocity="50" />
+  </joint>
+  <link name="link2">
+    <inertial>
+      <origin xyz="-0.1182274805 0.002645886379 -0.02715519385" rpy="0 0 0" />
+      <mass value="1.552" />
+      <inertia ixx="0.00073374" ixy="-4.3e-07" ixz="8.51e-06" iyy="0.01255987" iyz="1.28e-06" izz="0.01281387" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/motor_2_3.STL" />
+      </geometry>
+      <material name="rs_motor_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/cnc2.STL" />
+      </geometry>
+      <material name="rs_anodized_silver" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla2_black.STL" />
+      </geometry>
+      <material name="rs_pla_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla2_green.STL" />
+      </geometry>
+      <material name="rs_seeed_green" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0.020343 0.027237 0.07" rpy="-1.5708 0 0" />
+    <parent link="link1" />
+    <child link="link2" />
+    <axis xyz="0 0 1" />
+    <limit lower="0" upper="3.14" effort="36" velocity="50" />
+  </joint>
+  <link name="link3">
+    <inertial>
+      <origin xyz="0.1113022076 -0.0541487572 -0.0270259214" rpy="0 0 0" />
+      <mass value="1.255749959" />
+      <inertia ixx="0.00046807" ixy="-3.456e-05" ixz="-4.26e-05" iyy="0.00632695" iyz="6e-08" izz="0.00648221" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/cnc3.STL" />
+      </geometry>
+      <material name="rs_anodized_silver" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/motor_4.STL" />
+      </geometry>
+      <material name="rs_motor_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla3_black_without_seeed_badge.STL" />
+      </geometry>
+      <material name="rs_pla_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla3_seeed_badge_with_counters.STL" />
+      </geometry>
+      <material name="rs_seeed_green" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla3_seeed_wordmark_backing.STL" />
+      </geometry>
+      <material name="rs_wordmark_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla3_green.STL" />
+      </geometry>
+      <material name="rs_seeed_green" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint3" type="revolute">
+    <origin xyz="-0.236 0 0" rpy="0 0 0" />
+    <parent link="link2" />
+    <child link="link3" />
+    <axis xyz="0 0 -1" />
+    <limit lower="0" upper="3.14" effort="36" velocity="50" />
+  </joint>
+  <link name="link4">
+    <inertial>
+      <origin xyz="0.1222869791 -0.05021123912 -0.03084605284" rpy="0 0 0" />
+      <mass value="0.468427796" />
+      <inertia ixx="0.00045986" ixy="0.00024219" ixz="0" iyy="0.00075258" iyz="0" izz="0.00066742" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/motor_5.STL" />
+      </geometry>
+      <material name="rs_motor_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/cnc4.STL" />
+      </geometry>
+      <material name="rs_anodized_silver" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint4" type="revolute">
+    <origin xyz="0.228 -0.072746 0.0045" rpy="0 0 0" />
+    <parent link="link3" />
+    <child link="link4" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-1.57" upper="1.57" effort="14" velocity="40" />
+  </joint>
+  <link name="link5">
+    <inertial>
+      <origin xyz="-0.01209035182 -0.003035662895 0.02580969702" rpy="0 0 0" />
+      <mass value="0.2883479559" />
+      <inertia ixx="7.342380259e-05" ixy="1.35700947e-08" ixz="-8.581464338e-07" iyy="5.515388424e-05" iyz="-1.32742145e-08" izz="5.299200958e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/motor_6.STL" />
+      </geometry>
+      <material name="rs_motor_black" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/cnc5.STL" />
+      </geometry>
+      <material name="rs_anodized_silver" />
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/pla5_green.STL" />
+      </geometry>
+      <material name="rs_seeed_green" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/rebot_b601_rs/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0.087 -0.048 -0.03075" rpy="-1.5708 0 0" />
+    <parent link="link4" />
+    <child link="link5" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-1.57" upper="1.57" effort="14" velocity="40" />
+  </joint>
+  <link name="link6">
+    </link>
+  <joint name="joint6" type="revolute">
+    <origin xyz="0.0365 0 0.048" rpy="0 1.5708 0" />
+    <parent link="link5" />
+    <child link="link6" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-3.14" upper="3.14" effort="14" velocity="40" />
+  </joint>
+  <link name="adapter_link">
+    <inertial>
+      <origin xyz="0.01058363419 -0.03497844054 3.219248857e-05" rpy="0 0 0" />
+      <mass value="0.01184276102" />
+      <inertia ixx="1.864050585e-06" ixy="0" ixz="0" iyy="3.334921504e-06" iyz="-2.368552205e-09" izz="1.851023548e-06" />
+    </inertial>
+    <visual>
+      <geometry>
+        <mesh filename="../meshes/c1_adapter/c1_rs_taccap_adapter.stl" />
+      </geometry>
+      <material name="c1_adapter_mat">
+        <color rgba="0.65 0.68 0.72 1" />
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="../meshes/c1_adapter/c1_rs_taccap_adapter.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <material name="taccap_base_mat">
+    <color rgba="0.75294 0.75294 0.75294 1" />
+  </material>
+  <material name="taccap_left_mat">
+    <color rgba="1 1 1 1" />
+  </material>
+  <material name="taccap_right_mat">
+    <color rgba="0.60392 0.60392 0.60392 1" />
+  </material>
+  <material name="taccap_cover_mat">
+    <color rgba="0.89804 0.91765 0.92941 1" />
+  </material>
+  <link name="taccap_base_link">
+    <inertial>
+      <origin xyz="0.01017980751 -0.01133353419 -0.004012440543" rpy="0 0 0" />
+      <mass value="0.2457372912" />
+      <inertia ixx="0.0003392951033" ixy="0" ixz="0" iyy="0.0004429192623" iyz="0" izz="0.0004026538748" />
+    </inertial>
+    <visual name="base_visual">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0.01975 -0.0060769 0.034023" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/base_link.STL" />
+      </geometry>
+      <material name="taccap_base_mat" />
+    </visual>
+    <collision name="base_collision">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0.01975 -0.0060769 0.034023" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="taccap_left_finger_link">
+    <inertial>
+      <origin xyz="0.02071780751 -0.01727363419 0.03480855946" rpy="0 0 0" />
+      <mass value="0.2171843944" />
+      <inertia ixx="9.021223209e-05" ixy="1.732240655e-07" ixz="-1.44256672e-06" iyy="9.158007099e-05" iyz="-3.950449008e-06" izz="1.989939135e-05" />
+    </inertial>
+    <visual name="left_finger_visual">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/grip_left.STL" />
+      </geometry>
+      <material name="taccap_left_mat" />
+    </visual>
+    <collision name="left_finger_collision">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/grip_left.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="taccap_left_finger_joint" type="revolute">
+    <parent link="taccap_base_link" />
+    <child link="taccap_left_finger_link" />
+    <origin rpy="0 0 0" xyz="0.0120336718 0.0199500106 0.0484999712" />
+    <axis xyz="1 0 0" />
+    <limit effort="4" lower="-0.5047492196767601" upper="0" velocity="1" />
+    <dynamics damping="0.08" friction="0.01" />
+    <mimic joint="taccap_right_finger_joint" multiplier="-1" offset="0" />
+  </joint>
+  <link name="taccap_right_finger_link">
+    <inertial>
+      <origin xyz="0.02065380751 -0.003902234193 0.03479755946" rpy="0 0 0" />
+      <mass value="0.2171843944" />
+      <inertia ixx="9.022999623e-05" ixy="-1.749708727e-07" ixz="-1.445882693e-06" iyy="9.160375651e-05" iyz="3.945356621e-06" izz="1.989110141e-05" />
+    </inertial>
+    <visual name="right_finger_visual">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/grip_right.STL" />
+      </geometry>
+      <material name="taccap_right_mat" />
+    </visual>
+    <collision name="right_finger_collision">
+      <origin rpy="0 -1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/taccap_g1_slave/grip_right.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="taccap_right_finger_joint" type="revolute">
+    <parent link="taccap_base_link" />
+    <child link="taccap_right_finger_link" />
+    <origin rpy="0 0 0" xyz="0.0120336718 -0.0199499894 0.0484999712" />
+    <axis xyz="1 0 0" />
+    <limit effort="4" lower="0" upper="0.5047492196767601" velocity="1" />
+    <dynamics damping="0.08" friction="0.01" />
+  </joint>
+  <link name="taccap_eef_link" />
+  <joint name="taccap_eef_joint" type="fixed">
+    <parent link="taccap_base_link" />
+    <child link="taccap_eef_link" />
+    <origin rpy="0 0 0" xyz="0.036575 0 0.2009217" />
+  </joint>
+  <link name="taccap_camera_link" />
+  <joint name="taccap_camera_joint" type="fixed">
+    <parent link="taccap_base_link" />
+    <child link="taccap_camera_link" />
+    <origin rpy="0 0 0" xyz="-0.02275 0 0.06125" />
+  </joint>
+  <link name="taccap_camera_optical_link" />
+  <joint name="taccap_camera_optical_joint" type="fixed">
+    <parent link="taccap_camera_link" />
+    <child link="taccap_camera_optical_link" />
+    <origin rpy="0 0 -1.5707963267948966" xyz="0 0 0" />
+  </joint>
+  <joint name="world_to_base" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="world" />
+    <child link="base_link" />
+  </joint>
+  <joint name="link6_to_adapter" type="fixed">
+    <origin xyz="0 0 0" rpy="1.570796326794897 0 1.570796326794897" />
+    <parent link="link6" />
+    <child link="adapter_link" />
+  </joint>
+  <joint name="adapter_to_taccap" type="fixed">
+    <origin xyz="0 0.014 0" rpy="0 1.570796326794897 1.570796326794897" />
+    <parent link="adapter_link" />
+    <child link="taccap_base_link" />
+  </joint>
+</robot>

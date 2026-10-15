@@ -1,0 +1,84 @@
+#include "rebot_rt/control.hpp"
+
+#include <pybind11/eigen.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
+namespace py = pybind11;
+using namespace rebot_rt;
+
+PYBIND11_MODULE(_native, m) {
+  m.doc() = "C++ 100 Hz reBot B601 DM serial/SocketCAN, RS SocketCAN control and IK";
+  py::enum_<Family>(m, "Family")
+      .value("DM", Family::DM)
+      .value("RS", Family::RS);
+  py::class_<MotorConfig>(m, "MotorConfig")
+      .def(py::init<>())
+      .def_readwrite("send_id", &MotorConfig::send_id)
+      .def_readwrite("feedback_id", &MotorConfig::feedback_id)
+      .def_readwrite("model", &MotorConfig::model)
+      .def_readwrite("pmax", &MotorConfig::pmax)
+      .def_readwrite("vmax", &MotorConfig::vmax)
+      .def_readwrite("tmax", &MotorConfig::tmax)
+      .def_readwrite("kp", &MotorConfig::kp)
+      .def_readwrite("kd", &MotorConfig::kd)
+      .def_readwrite("vel_kp", &MotorConfig::vel_kp)
+      .def_readwrite("vel_ki", &MotorConfig::vel_ki)
+      .def_readwrite("pos_kp", &MotorConfig::pos_kp)
+      .def_readwrite("pos_ki", &MotorConfig::pos_ki)
+      .def_readwrite("kpmax", &MotorConfig::kpmax)
+      .def_readwrite("kdmax", &MotorConfig::kdmax)
+      .def_readwrite("direction", &MotorConfig::direction)
+      .def("set_model", &MotorConfig::set_model, py::arg("family"), py::arg("model"));
+  m.def("default_motor_configs", &default_motor_configs, py::arg("family"));
+  py::class_<State>(m, "State")
+      .def_readonly("q", &State::q)
+      .def_readonly("dq", &State::dq)
+      .def_readonly("tau", &State::tau)
+      .def_readonly("target", &State::target)
+      .def_readonly("command", &State::command)
+      .def_readonly("command_velocity", &State::command_velocity)
+      .def_readonly("fresh", &State::fresh)
+      .def_readonly("age_sec", &State::age_sec)
+      .def_readonly("cycles", &State::cycles)
+      .def_readonly("overruns", &State::overruns)
+      .def_readonly("running", &State::running)
+      .def_readonly("fault", &State::fault)
+      .def_readonly("fault_reason", &State::fault_reason);
+  py::class_<IKStatus>(m, "IKStatus")
+      .def_readonly("success", &IKStatus::success)
+      .def_readonly("error", &IKStatus::error)
+      .def_readonly("iterations", &IKStatus::iterations)
+      .def_readonly("target", &IKStatus::target);
+  py::class_<Robot>(m, "Robot")
+      .def(py::init<Family, std::string, std::string, std::string, bool, double, double, uint32_t,
+                    std::vector<MotorConfig>, std::string>(),
+           py::arg("family"), py::arg("channel"), py::arg("urdf_path"),
+           py::arg("end_frame") = "", py::arg("has_gripper") = true,
+           py::arg("max_joint_speed") = 0.5, py::arg("command_timeout_sec") = 0.5,
+           py::arg("dm_serial_baud") = 921600,
+           py::arg("motor_configs") = std::vector<MotorConfig>{},
+           py::arg("control_mode") = "mit")
+      .def("connect", &Robot::connect, py::call_guard<py::gil_scoped_release>())
+      .def("start", &Robot::start, py::call_guard<py::gil_scoped_release>())
+      .def("stop", &Robot::stop, py::call_guard<py::gil_scoped_release>())
+      .def("close", &Robot::close, py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly("connected", &Robot::connected)
+      .def_property_readonly("running", &Robot::running)
+      .def("get_state", &Robot::get_state)
+      .def("get_target_joints", &Robot::get_target_joints)
+      .def("set_target_joints", &Robot::set_target_joints, py::arg("q"),
+           py::arg("max_joint_speed") = py::none())
+      .def("hold_position", &Robot::hold_position)
+      .def("set_target_pose", &Robot::set_target_pose, py::arg("pose"),
+           py::arg("gripper") = 0.0, py::call_guard<py::gil_scoped_release>())
+      .def("forward_kinematics", py::overload_cast<>(&Robot::forward_kinematics, py::const_))
+      .def("forward_kinematics", py::overload_cast<const JointArray&>(&Robot::forward_kinematics, py::const_),
+           py::arg("q"))
+      .def("__enter__", [](Robot& self) -> Robot& { self.connect(); self.start(); return self; },
+           py::return_value_policy::reference_internal)
+      .def("__exit__", [](Robot& self, py::object, py::object, py::object) {
+          py::gil_scoped_release release;
+          self.close();
+      });
+}
