@@ -53,6 +53,10 @@ struct State {
   JointArray command_velocity{};      // position-ramp slope, regardless of motor mode
   JointArray mit_command_velocity{};  // MIT dq field before direction/quantization; zero for pos_vel
   std::array<bool, kMotorCount> fresh{};
+  JointArray feedback_age_sec{};
+  std::array<uint64_t, kMotorCount> feedback_count{};
+  uint32_t can_rx_dropped = 0;
+  double cycle_interval_sec = 0.0;
   double age_sec = 0.0;
   uint64_t cycles = 0;
   uint64_t overruns = 0;
@@ -179,11 +183,12 @@ private:
   void write_setting(int index, uint16_t setting, uint32_t value);
   void configure_motor(int index);
   void send_position(int index, double q);
-  void read_feedback_until(Clock::time_point deadline);
-  void read_can_feedback_until(Clock::time_point deadline);
-  void read_serial_feedback_until(Clock::time_point deadline);
+  void read_feedback_until(Clock::time_point deadline, bool wait = true);
+  void read_can_feedback_until(Clock::time_point deadline, bool wait);
+  void read_serial_feedback_until(Clock::time_point deadline, bool wait);
   bool parse_serial_frame(uint32_t& id, std::array<uint8_t, 8>& data, uint8_t& dlc);
-  void decode_frame(uint32_t id, const std::array<uint8_t, 8>& data);
+  void decode_frame(uint32_t id, const std::array<uint8_t, 8>& data,
+                    Clock::time_point received_at = Clock::now());
   void enable_all();
   void disable_all() noexcept;
   void run() noexcept;

@@ -217,6 +217,7 @@ finally:
                     fault_reported = False
                     runtime_fault_sent = False
                     enabled = set()
+                    all_enabled_at = None
 
                     def send(kind, motor, data, status_bits=0):
                         connection.sendall(FRAME.pack(
@@ -224,6 +225,11 @@ finally:
 
                     def status(motor, kind=2):
                         nonlocal fault_reported
+                        if motor == 4 and fault_case == "silent_runtime" and len(enabled) == 6:
+                            return
+                        if motor == 4 and fault_case == "stale_queue" and all_enabled_at is not None \
+                                and time.monotonic() - all_enabled_at > 0.06:
+                            return
                         flags = 0
                         mode = 2 if motor in enabled else 0
                         if motor == 6:
@@ -259,6 +265,8 @@ finally:
                             frames.append((kind, motor, data))
                             if kind == 3:
                                 enabled.add(motor)
+                                if len(enabled) == 6:
+                                    all_enabled_at = time.monotonic()
                             elif kind == 4:
                                 enabled.discard(motor)
                                 if motor == 6 and data[0] == 1:
@@ -336,6 +344,76 @@ finally:
         self.assertFalse(thread.is_alive())
         self.assertFalse(errors, errors)
         return result, frames, registers
+
+    def run_feedback_pause(self, mode, silent=False):
+        # Only the child controller is paused; the parent fake motor keeps
+        # sending. This reproduces feedback waiting unread after a late wakeup.
+        return self.run_native(control_mode=mode, active_report_type=24, reply_status=False,
+                               fault_case="stale_queue" if silent else None, script='''
+import os, signal, subprocess, sys, time
+from pathlib import Path
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False,
+                       control_mode=os.environ["REBOT_TEST_CONTROL_MODE"], mit_velocity_feedforward=False)
+try:
+    robot.connect()
+    robot.start()
+    time.sleep(0.04)
+    resume = subprocess.Popen([sys.executable, "-c", "import os, signal, time; time.sleep(0.20); os.kill(" + str(os.getpid()) + ", signal.SIGCONT)"])
+    os.kill(os.getpid(), signal.SIGSTOP)
+    resume.wait(timeout=2)
+    time.sleep(0.04)
+    state = robot.get_state()
+    EXPECTATION
+finally:
+    robot.close()
+'''.replace('    EXPECTATION', '''
+    assert state.fault and not state.running, state.fault_reason
+    assert "stale feedback from motor 4" in state.fault_reason, state.fault_reason
+    assert "ages_ms=[" in state.fault_reason and "rx_dropped=" in state.fault_reason
+    assert state.feedback_age_sec[3] > 0.1, state.feedback_age_sec
+''' if silent else '''
+    assert not state.fault and state.running, state.fault_reason
+    assert all(state.fresh[:6]), state.feedback_age_sec
+    assert all(count > 10 for count in state.feedback_count[:6]), state.feedback_count
+    assert state.can_rx_dropped == 0
+'''))
+
+    def test_queued_recent_feedback_is_read_before_timeout_after_scheduling_pause(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_feedback_pause(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_old_queued_frames_cannot_refresh_a_silent_motor(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, frames, _ = self.run_feedback_pause(mode, silent=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(sum(kind == 3 for kind, _, _ in frames), 6)
+                self.assertTrue(all(kind == 4 for kind, _, _ in frames[-6:]))
+
+    def test_missing_motor_feedback_still_disables_without_auto_reenable(self):
+        result, frames, _ = self.run_native(fault_case="silent_runtime", control_mode="mit", script='''
+import time
+from pathlib import Path
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False)
+try:
+    robot.connect()
+    robot.start()
+    time.sleep(0.16)
+    state = robot.get_state()
+    assert state.fault and not state.running, state.fault_reason
+    assert "stale feedback from motor 4" in state.fault_reason, state.fault_reason
+finally:
+    robot.close()
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sum(kind == 3 for kind, _, _ in frames), 6)
+        self.assertTrue(all(kind == 4 for kind, _, _ in frames[-6:]))
 
     def test_streaming_uses_csp_gains_measured_start_and_watchdog_hold(self):
         result, frames, registers = self.run_native()

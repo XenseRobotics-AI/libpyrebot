@@ -4,12 +4,15 @@
 #include <cerrno>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 
 #include <fcntl.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <linux/time_types.h>
 #include <net/if.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -251,6 +254,8 @@ void Robot::connect() {
     std::lock_guard<std::mutex> lock(mutex_);
     state_.fault = false;
     state_.fault_reason.clear();
+    state_.feedback_count.fill(0);
+    state_.can_rx_dropped = 0;
   }
   serial_ = family_ == Family::DM && channel_.front() == '/';
   if (serial_) {
@@ -277,6 +282,12 @@ void Robot::connect() {
   } else {
     const int sock = ::socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
     if (sock < 0) throw std::system_error(errno, std::generic_category(), "socket(PF_CAN)");
+    const int enabled = 1;
+    if (::setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPNS_NEW, &enabled, sizeof(enabled)) < 0 ||
+        ::setsockopt(sock, SOL_SOCKET, SO_RXQ_OVFL, &enabled, sizeof(enabled)) < 0) {
+      const int e = errno; ::close(sock);
+      throw std::system_error(e, std::generic_category(), "CAN receive timestamp/drop reporting");
+    }
     const unsigned int index = ::if_nametoindex(channel_.c_str());
     if (index == 0) { ::close(sock); throw std::runtime_error("unknown CAN interface: " + channel_); }
     sockaddr_can addr{};
@@ -432,6 +443,7 @@ State Robot::get_state() const {
     const auto age = std::chrono::duration<double>(now - motors_[i].last_feedback).count();
     copy.age_sec = std::max(copy.age_sec, age);
     copy.fresh[i] = age <= std::chrono::duration<double>(kFeedbackLimit).count();
+    copy.feedback_age_sec[i] = age;
   }
   return copy;
 }
@@ -856,7 +868,7 @@ void Robot::send_position(int index, double q) {
   }
 }
 
-void Robot::decode_frame(uint32_t id, const std::array<uint8_t, 8>& data) {
+void Robot::decode_frame(uint32_t id, const std::array<uint8_t, 8>& data, Clock::time_point received_at) {
   int index = -1;
   if (family_ == Family::DM) {
     for (int i = 0; i < kMotorCount; ++i)
@@ -953,29 +965,58 @@ void Robot::decode_frame(uint32_t id, const std::array<uint8_t, 8>& data) {
   const int feedback_bits = family_ == Family::RS ? 16 : 12;
   state_.dq[index] = m.direction * decode(v, -m.vmax, m.vmax, feedback_bits);
   state_.tau[index] = m.direction * decode(t, -m.tmax, m.tmax, feedback_bits);
-  motors_[index].last_feedback = now;
+  motors_[index].last_feedback = std::max(motors_[index].last_feedback, received_at);
+  ++state_.feedback_count[index];
 }
 
-void Robot::read_feedback_until(Clock::time_point deadline) {
-  if (serial_) read_serial_feedback_until(deadline);
-  else read_can_feedback_until(deadline);
+void Robot::read_feedback_until(Clock::time_point deadline, bool wait) {
+  if (serial_) read_serial_feedback_until(deadline, wait);
+  else read_can_feedback_until(deadline, wait);
 }
 
-void Robot::read_can_feedback_until(Clock::time_point deadline) {
+void Robot::read_can_feedback_until(Clock::time_point deadline, bool wait) {
   while (Clock::now() < deadline) {
     can_frame frame{};
-    const auto size = ::read(fd_, &frame, sizeof(frame));
+    iovec io{&frame, sizeof(frame)};
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(__kernel_timespec)) + CMSG_SPACE(sizeof(uint32_t))]{};
+    msghdr message{};
+    message.msg_iov = &io;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    const auto size = ::recvmsg(fd_, &message, MSG_DONTWAIT);
     if (size == sizeof(frame)) {
       if ((frame.can_id & (CAN_ERR_FLAG | CAN_RTR_FLAG)) || frame.can_dlc < 8) continue;
       const bool extended = (frame.can_id & CAN_EFF_FLAG) != 0;
       if (extended != (family_ == Family::RS)) continue;
       std::array<uint8_t, 8> data{};
       std::memcpy(data.data(), frame.data, 8);
-      decode_frame(frame.can_id & (extended ? CAN_EFF_MASK : CAN_SFF_MASK), data);
+      auto received_at = Clock::now();
+      for (auto* cmsg = CMSG_FIRSTHDR(&message); cmsg; cmsg = CMSG_NXTHDR(&message, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET) continue;
+        if (cmsg->cmsg_type == SO_TIMESTAMPNS_NEW && cmsg->cmsg_len >= CMSG_LEN(sizeof(__kernel_timespec))) {
+          __kernel_timespec stamp{};
+          std::memcpy(&stamp, CMSG_DATA(cmsg), sizeof(stamp));
+          // Kernel RX time is CLOCK_REALTIME; subtract its age from the
+          // monotonic clock. Decoding queued old packets must not renew safety
+          // freshness as if they had just arrived from the motor.
+          const auto arrival = std::chrono::seconds(stamp.tv_sec) + std::chrono::nanoseconds(stamp.tv_nsec);
+          const auto age = std::max(std::chrono::system_clock::now().time_since_epoch() - arrival,
+                                    std::chrono::system_clock::duration::zero());
+          received_at -= std::chrono::duration_cast<Clock::duration>(age);
+        } else if (cmsg->cmsg_type == SO_RXQ_OVFL && cmsg->cmsg_len >= CMSG_LEN(sizeof(uint32_t))) {
+          uint32_t dropped = 0;
+          std::memcpy(&dropped, CMSG_DATA(cmsg), sizeof(dropped));
+          std::lock_guard<std::mutex> lock(mutex_);
+          state_.can_rx_dropped = dropped;
+        }
+      }
+      decode_frame(frame.can_id & (extended ? CAN_EFF_MASK : CAN_SFF_MASK), data, received_at);
       continue;
     }
     if (size < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
       throw std::system_error(errno, std::generic_category(), "CAN read");
+    if (!wait) break;
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
     if (remaining.count() <= 0) break;
     pollfd pfd{fd_, POLLIN, 0};
@@ -1012,7 +1053,7 @@ bool Robot::parse_serial_frame(uint32_t& id, std::array<uint8_t, 8>& data, uint8
   return false;
 }
 
-void Robot::read_serial_feedback_until(Clock::time_point deadline) {
+void Robot::read_serial_feedback_until(Clock::time_point deadline, bool wait) {
   std::array<uint8_t, 256> buffer{};
   while (Clock::now() < deadline) {
     uint32_t id = 0;
@@ -1029,6 +1070,7 @@ void Robot::read_serial_feedback_until(Clock::time_point deadline) {
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
       throw std::system_error(errno, std::generic_category(), "serial read");
+    if (!wait) break;
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
     if (remaining.count() <= 0) break;
     pollfd pfd{fd_, POLLIN, 0};
@@ -1061,10 +1103,21 @@ void Robot::disable_all() noexcept {
 
 void Robot::run() noexcept {
   auto next = Clock::now();
+  auto previous_cycle = next;
   try {
     while (running_) {
       next += kPeriod;
+      const auto cycle_started = Clock::now();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.cycle_interval_sec = std::chrono::duration<double>(cycle_started - previous_cycle).count();
+      }
+      previous_cycle = cycle_started;
       update_cartesian_target();
+      // A late wakeup/IK/send can exhaust the previous tick's read budget.
+      // Consume queued feedback before testing freshness or sending anything.
+      // Bound draining under continuous traffic, and never wait on an empty RX.
+      read_feedback_until(Clock::now() + std::chrono::milliseconds(2), false);
       JointArray command{};
       JointArray velocity{};
       JointArray mit_velocity{};
@@ -1074,8 +1127,19 @@ void Robot::run() noexcept {
         if (state_.fault) throw std::runtime_error(state_.fault_reason);
         for (int i = 0; i < kMotorCount; ++i) {
           if (i == kArmDof && !has_gripper_) continue;
-          if (now - motors_[i].last_feedback > kFeedbackLimit)
-            throw std::runtime_error("stale feedback from motor " + std::to_string(i + 1));
+          if (now - motors_[i].last_feedback > kFeedbackLimit) {
+            std::ostringstream reason;
+            reason << std::fixed << std::setprecision(1)
+                   << "stale feedback from motor " << i + 1 << " (limit_ms=100, ages_ms=[";
+            for (int j = 0; j < kMotorCount; ++j) {
+              if (j == kArmDof && !has_gripper_) continue;
+              if (j) reason << ", ";
+              reason << std::chrono::duration<double, std::milli>(now - motors_[j].last_feedback).count();
+            }
+            reason << "], cycle_ms=" << state_.cycle_interval_sec * 1000
+                   << ", overruns=" << state_.overruns << ", rx_dropped=" << state_.can_rx_dropped << ")";
+            throw std::runtime_error(reason.str());
+          }
         }
         const bool timed_out = std::chrono::duration<double>(now - last_command_).count() > command_timeout_sec_;
         if (timed_out && cartesian_enabled_) {
