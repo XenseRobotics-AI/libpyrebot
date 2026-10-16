@@ -179,8 +179,9 @@ std::array<MotorConfig, kMotorCount> default_motor_configs(Family family) {
 Robot::Robot(Family family, std::string channel, std::string urdf_path,
              std::string end_frame, bool has_gripper, double max_joint_speed,
              double command_timeout_sec, uint32_t dm_serial_baud,
-             std::vector<MotorConfig> motor_configs, std::string control_mode)
-    : family_(family), control_mode_(std::move(control_mode)), channel_(std::move(channel)), end_frame_(std::move(end_frame)),
+             std::vector<MotorConfig> motor_configs, std::string control_mode, bool mit_velocity_feedforward)
+    : family_(family), control_mode_(std::move(control_mode)), mit_velocity_feedforward_(mit_velocity_feedforward),
+      channel_(std::move(channel)), end_frame_(std::move(end_frame)),
       has_gripper_(has_gripper), max_joint_speed_(max_joint_speed), target_joint_speed_(max_joint_speed),
       command_timeout_sec_(command_timeout_sec), dm_serial_baud_(dm_serial_baud), model_(urdf_path),
       frame_id_(end_frame_.empty() ? model_.end_effector_frame_id() : model_.frame_id(end_frame_)) {
@@ -342,8 +343,10 @@ void Robot::connect() {
     if (state_.fault) throw std::runtime_error(state_.fault_reason);
     target_ = state_.q;
     sent_ = target_;
+    cancel_cartesian_locked();
     target_joint_speed_ = max_joint_speed_;
     state_.command_velocity.fill(0.0);
+    state_.mit_command_velocity.fill(0.0);
     last_command_ = Clock::now();
   } catch (...) {
     disable_all();
@@ -391,9 +394,11 @@ void Robot::start() {
     }
     target_ = state_.q;
     sent_ = target_;
+    cancel_cartesian_locked();
     target_joint_speed_ = max_joint_speed_;
     last_command_ = Clock::now();
     state_.command_velocity.fill(0.0);
+    state_.mit_command_velocity.fill(0.0);
   }
   // Establish a measured hold target before enabling position controllers.
   for (int i = 0; i < kArmDof; ++i)
@@ -447,6 +452,7 @@ void Robot::set_target_joints(const JointArray& q, std::optional<double> max_joi
   }
   std::lock_guard<std::mutex> lock(mutex_);
   if (state_.fault) throw std::runtime_error("control fault: " + state_.fault_reason);
+  cancel_cartesian_locked();
   target_ = q;
   target_joint_speed_ = speed;
   last_command_ = Clock::now();
@@ -455,6 +461,7 @@ void Robot::set_target_joints(const JointArray& q, std::optional<double> max_joi
 void Robot::hold_position() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (state_.fault) throw std::runtime_error("control fault: " + state_.fault_reason);
+  cancel_cartesian_locked();
   target_ = sent_;
   last_command_ = Clock::now();
 }
@@ -487,6 +494,109 @@ IKStatus Robot::set_target_pose(const Eigen::Matrix4d& pose, double gripper) {
   }
   if (status.success) set_target_joints(status.target);
   return status;
+}
+
+void Robot::cancel_cartesian_locked() {
+  cartesian_enabled_ = false;
+  cartesian_endpoint_ = false;
+  cartesian_last_update_ = {};
+  state_.cartesian_active = false;
+  state_.cartesian_ik_valid = false;
+  // Invalidate an IK solve already in flight before a reset/hold/new session.
+  ++state_.cartesian_sequence;
+}
+
+uint64_t Robot::queue_target_pose(const Eigen::Matrix4d& pose, double gripper) {
+  if (!pose.allFinite() || !valid_rotation(pose.block<3, 3>(0, 0)) ||
+      (pose.row(3) - Eigen::RowVector4d(0, 0, 0, 1)).norm() > 1e-6)
+    throw std::invalid_argument("target must be a finite rigid 4x4 transform");
+  if (!std::isfinite(gripper) || (has_gripper_ &&
+      (gripper < motors_[kArmDof].lower || gripper > motors_[kArmDof].upper)))
+    throw std::invalid_argument("invalid gripper target");
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (state_.fault) throw std::runtime_error("control fault: " + state_.fault_reason);
+  const auto now = Clock::now();
+  const double interval = cartesian_last_update_ == Clock::time_point{}
+      ? 0.01 : std::chrono::duration<double>(now - cartesian_last_update_).count();
+  // A producer restart must not inherit a multi-second interpolation delay.
+  state_.cartesian_duration_sec = interval > command_timeout_sec_ ? 0.01 : std::max(0.01, interval);
+  cartesian_goal_ = pose;
+  cartesian_gripper_ = gripper;
+  cartesian_last_update_ = now;
+  cartesian_enabled_ = true;
+  cartesian_endpoint_ = false;
+  state_.cartesian_active = true;
+  last_command_ = now;  // Only producer calls refresh the watchdog, never IK substeps.
+  return ++state_.cartesian_sequence;
+}
+
+void Robot::update_cartesian_target() {
+  JointArray seed;
+  Eigen::Matrix4d start, goal;
+  Clock::time_point started;
+  double duration, gripper;
+  uint64_t sequence;
+  bool new_segment;
+  const auto now = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!cartesian_enabled_ || !state_.cartesian_active || state_.fault) return;
+    if (std::chrono::duration<double>(now - last_command_).count() > command_timeout_sec_) return;
+    seed = sent_;  // Warm-start from the command actually reached by the limiter.
+    sequence = state_.cartesian_sequence;
+    new_segment = sequence != state_.cartesian_consumed_sequence;
+    start = cartesian_start_;
+    goal = cartesian_goal_;
+    started = new_segment ? now : cartesian_started_;
+    duration = state_.cartesian_duration_sec;
+    gripper = cartesian_gripper_;
+  }
+  const double alpha = std::clamp(
+      (std::chrono::duration<double>(now - started).count() + 0.01) / duration, 0.0, 1.0);
+  rebotarm::IKResult result;
+  {
+    // Never hold the command mutex during FK/IK: A/reset/hold can invalidate
+    // this generation while it is being solved, and get_state stays responsive.
+    std::lock_guard<std::mutex> model_lock(model_mutex_);
+    if (new_segment) start = std::get<2>(model_.fk(model_q(seed), end_frame_));
+    Eigen::Matrix4d sample = Eigen::Matrix4d::Identity();
+    sample.block<3, 1>(0, 3) = start.block<3, 1>(0, 3) +
+        alpha * (goal.block<3, 1>(0, 3) - start.block<3, 1>(0, 3));
+    Eigen::Quaterniond from(start.block<3, 3>(0, 0)), to(goal.block<3, 3>(0, 0));
+    from.normalize();
+    to.normalize();
+    if (from.dot(to) < 0.0) to.coeffs() *= -1.0;
+    sample.block<3, 3>(0, 0) = from.slerp(alpha, to).normalized().toRotationMatrix();
+    rebotarm::IKParams params;
+    params.max_iter = 150;
+    params.tolerance = 1e-4;
+    params.max_time_sec = 0.003;  // Reserve the rest of the 10 ms cycle for CAN and feedback.
+    result = model_.solve_ik(sample, model_q(seed), frame_id_, params);
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!cartesian_enabled_ || state_.cartesian_sequence != sequence || state_.fault ||
+      std::chrono::duration<double>(Clock::now() - last_command_).count() > command_timeout_sec_) return;
+  state_.cartesian_consumed_sequence = sequence;
+  state_.cartesian_ik_valid = true;
+  state_.cartesian_ik_success = result.success;
+  state_.cartesian_ik_error = result.error;
+  ++state_.cartesian_ik_solves;
+  cartesian_start_ = start;
+  cartesian_started_ = started;
+  if (!result.success) {
+    // Hold the last command immediately; retry only on a new producer waypoint.
+    target_ = sent_;
+    state_.cartesian_active = false;
+    return;
+  }
+  for (int i = 0; i < kArmDof; ++i) {
+    if (!std::isfinite(result.q[i]) || result.q[i] < motors_[i].lower || result.q[i] > motors_[i].upper)
+      throw std::runtime_error("Cartesian IK produced an invalid joint target");
+    target_[i] = result.q[i];
+  }
+  if (has_gripper_) target_[kArmDof] = gripper;
+  target_joint_speed_ = max_joint_speed_;
+  cartesian_endpoint_ = alpha >= 1.0;
 }
 
 Eigen::Matrix4d Robot::forward_kinematics() const { return forward_kinematics(get_state().q); }
@@ -954,8 +1064,10 @@ void Robot::run() noexcept {
   try {
     while (running_) {
       next += kPeriod;
+      update_cartesian_target();
       JointArray command{};
       JointArray velocity{};
+      JointArray mit_velocity{};
       {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto now = Clock::now();
@@ -966,6 +1078,10 @@ void Robot::run() noexcept {
             throw std::runtime_error("stale feedback from motor " + std::to_string(i + 1));
         }
         const bool timed_out = std::chrono::duration<double>(now - last_command_).count() > command_timeout_sec_;
+        if (timed_out && cartesian_enabled_) {
+          cancel_cartesian_locked();
+          target_ = sent_;
+        }
         const double arm_step = target_joint_speed_ * 0.01;
         const double gripper_step = max_joint_speed_ * 0.01;
         double largest_arm_delta = 0.0;
@@ -981,8 +1097,23 @@ void Robot::run() noexcept {
           sent_[i] += delta;
           command[i] = sent_[i];
           velocity[i] = delta / 0.01;
+          // A finite difference of piecewise Cartesian/IK samples is not a
+          // continuous velocity trajectory. In MIT it also enters the Kd
+          // term directly, exposing waypoint-boundary ripple as torque kicks.
+          // Allow position tracking with damping (dq_des=0), as in libtron2rt.
+          // Keep the optional CAN gripper's existing MIT behavior independent.
+          if ((i < kArmDof && !position_mode(i) && mit_velocity_feedforward_) ||
+              (i == kArmDof && has_gripper_))
+            mit_velocity[i] = velocity[i];
         }
         state_.command_velocity = velocity;
+        state_.mit_command_velocity = mit_velocity;
+        if (cartesian_enabled_ && cartesian_endpoint_) {
+          bool reached = true;
+          for (int i = 0; i < kArmDof; ++i)
+            reached &= std::abs(target_[i] - sent_[i]) < 1e-12;
+          if (reached) state_.cartesian_active = false;
+        }
         ++state_.cycles;
       }
       for (int i = 0; i < kMotorCount; ++i) {
@@ -991,12 +1122,12 @@ void Robot::run() noexcept {
         if (position_mode(i)) {
           send_position(i, command[i]);
         } else if (family_ == Family::RS) {
-          const auto payload = rs_mit_payload(command[i] * m.direction, velocity[i] * m.direction, m.kp, m.kd,
+          const auto payload = rs_mit_payload(command[i] * m.direction, mit_velocity[i] * m.direction, m.kp, m.kd,
                                               m.pmax, m.vmax, m.kpmax, m.kdmax);
           const auto torque = encode(0.0, -m.tmax, m.tmax, 16);
           send_rs_mit(i, payload, torque);
         } else {
-          send_frame(m.send_id, mit_frame(command[i] * m.direction, velocity[i] * m.direction, m.kp, m.kd,
+          send_frame(m.send_id, mit_frame(command[i] * m.direction, mit_velocity[i] * m.direction, m.kp, m.kd,
                                           0.0, m.pmax, m.vmax, m.tmax, m.kpmax, m.kdmax));
         }
       }

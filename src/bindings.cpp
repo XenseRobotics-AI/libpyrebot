@@ -38,13 +38,22 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("target", &State::target)
       .def_readonly("command", &State::command)
       .def_readonly("command_velocity", &State::command_velocity)
+      .def_readonly("mit_command_velocity", &State::mit_command_velocity)
       .def_readonly("fresh", &State::fresh)
       .def_readonly("age_sec", &State::age_sec)
       .def_readonly("cycles", &State::cycles)
       .def_readonly("overruns", &State::overruns)
       .def_readonly("running", &State::running)
       .def_readonly("fault", &State::fault)
-      .def_readonly("fault_reason", &State::fault_reason);
+      .def_readonly("fault_reason", &State::fault_reason)
+      .def_readonly("cartesian_active", &State::cartesian_active)
+      .def_readonly("cartesian_ik_valid", &State::cartesian_ik_valid)
+      .def_readonly("cartesian_ik_success", &State::cartesian_ik_success)
+      .def_readonly("cartesian_ik_error", &State::cartesian_ik_error)
+      .def_readonly("cartesian_duration_sec", &State::cartesian_duration_sec)
+      .def_readonly("cartesian_sequence", &State::cartesian_sequence)
+      .def_readonly("cartesian_consumed_sequence", &State::cartesian_consumed_sequence)
+      .def_readonly("cartesian_ik_solves", &State::cartesian_ik_solves);
   py::class_<IKStatus>(m, "IKStatus")
       .def_readonly("success", &IKStatus::success)
       .def_readonly("error", &IKStatus::error)
@@ -52,13 +61,13 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("target", &IKStatus::target);
   py::class_<Robot>(m, "Robot")
       .def(py::init<Family, std::string, std::string, std::string, bool, double, double, uint32_t,
-                    std::vector<MotorConfig>, std::string>(),
+                    std::vector<MotorConfig>, std::string, bool>(),
            py::arg("family"), py::arg("channel"), py::arg("urdf_path"),
            py::arg("end_frame") = "", py::arg("has_gripper") = true,
            py::arg("max_joint_speed") = 0.5, py::arg("command_timeout_sec") = 0.5,
            py::arg("dm_serial_baud") = 921600,
            py::arg("motor_configs") = std::vector<MotorConfig>{},
-           py::arg("control_mode") = "mit")
+           py::arg("control_mode") = "mit", py::arg("mit_velocity_feedforward") = true)
       .def("connect", &Robot::connect, py::call_guard<py::gil_scoped_release>())
       .def("start", &Robot::start, py::call_guard<py::gil_scoped_release>())
       .def("stop", &Robot::stop, py::call_guard<py::gil_scoped_release>())
@@ -72,6 +81,7 @@ PYBIND11_MODULE(_native, m) {
       .def("hold_position", &Robot::hold_position)
       .def("set_target_pose", &Robot::set_target_pose, py::arg("pose"),
            py::arg("gripper") = 0.0, py::call_guard<py::gil_scoped_release>())
+      .def("queue_target_pose", &Robot::queue_target_pose, py::arg("pose"), py::arg("gripper") = 0.0)
       .def("forward_kinematics", py::overload_cast<>(&Robot::forward_kinematics, py::const_))
       .def("forward_kinematics", py::overload_cast<const JointArray&>(&Robot::forward_kinematics, py::const_),
            py::arg("q"))

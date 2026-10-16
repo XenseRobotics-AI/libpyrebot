@@ -18,6 +18,175 @@ FRAME = struct.Struct("=IB3x8s")
 
 
 class TestRsSocketCan(unittest.TestCase):
+    CARTESIAN_SCRIPT = '''
+import os
+import time
+from pathlib import Path
+import numpy as np
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
+                       has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"],
+                       mit_velocity_feedforward=os.environ.get("REBOT_TEST_MIT_FF", "1") == "1",
+                       max_joint_speed=1.5, command_timeout_sec=0.3)
+def wait_for(check, timeout=0.6):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = robot.get_state()
+        assert not state.fault, state.fault_reason
+        if check(state):
+            return state
+        time.sleep(0.001)
+    raise AssertionError((state.command, state.cartesian_active, state.cartesian_ik_error))
+robot.connect()
+robot.start()
+try:
+    seed = np.array(robot.get_state().command)
+    sequence = robot.queue_target_pose(robot.forward_kinematics(seed))
+    wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
+    BODY
+finally:
+    robot.close()
+'''
+
+    def run_cartesian(self, body, mode, feedforward=True):
+        return self.run_native(
+            script=self.CARTESIAN_SCRIPT.replace("    BODY", body), control_mode=mode,
+            initial_q=[0.15, 0.6, 0.5, -0.25, 0.2, 0.1],
+            active_report_type=24, reply_status=False,
+            feedforward=feedforward,
+        )
+
+    def test_cartesian_mit_dq_can_be_zero_with_the_position_ramp_still_moving(self):
+        for mode in ("mit", "pos_vel"):
+            for feedforward in (False, True):
+                with self.subTest(mode=mode, feedforward=feedforward):
+                    result, frames, _ = self.run_cartesian('''
+    time.sleep(0.065)
+    q_goal = seed.copy()
+    q_goal[1] += 0.04
+    goal = robot.forward_kinematics(q_goal)
+    sequence = robot.queue_target_pose(goal)
+    moving = wait_for(lambda s: s.command_velocity[1] > 0.1)
+    if os.environ["REBOT_TEST_CONTROL_MODE"] == "pos_vel" or os.environ["REBOT_TEST_MIT_FF"] == "0":
+        np.testing.assert_allclose(moving.mit_command_velocity[:6], 0, atol=1e-12)
+    else:
+        np.testing.assert_allclose(moving.mit_command_velocity[:6], moving.command_velocity[:6])
+    done = wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
+    assert done.cartesian_ik_success, done.cartesian_ik_error
+    np.testing.assert_allclose(robot.forward_kinematics(done.command), goal, atol=0.0002)
+    time.sleep(0.03)
+    np.testing.assert_allclose(robot.get_state().mit_command_velocity, 0, atol=1e-12)
+''', mode, feedforward=feedforward)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    mit = [data for kind, motor, data in frames if kind == 1 and motor == 2]
+                    if mode == "pos_vel":
+                        self.assertFalse(mit)
+                        self.assertTrue(any(kind == 18 and data[:2] == b'\x16\x70'
+                                            for kind, _, data in frames))
+                    else:
+                        self.assertGreater(len(mit), 5)
+                        dq = [-50 + int.from_bytes(data[2:4], "big") * 100 / 65535 for data in mit]
+                        if feedforward:
+                            self.assertGreater(max(dq), 0.1)
+                        else:
+                            self.assertTrue(all(abs(v) <= 100 / 65535 for v in dq), dq)
+                        # Turning off dq must not remove MIT stiffness or damping.
+                        for data in mit:
+                            self.assertAlmostEqual(int.from_bytes(data[4:6], "big") * 5000 / 65535,
+                                                   150, delta=5000 / 65535)
+                            self.assertAlmostEqual(int.from_bytes(data[6:8], "big") * 100 / 65535,
+                                                   10, delta=100 / 65535)
+
+    def test_cartesian_time_interpolation_in_mit_and_position_modes(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_cartesian('''
+    # A small reachable pose change used to be sent in one 10 ms burst.
+    time.sleep(0.065)
+    q_goal = seed.copy()
+    q_goal[0] += 0.008
+    goal = robot.forward_kinematics(q_goal)
+    before = robot.get_state().cartesian_ik_solves
+    sequence = robot.queue_target_pose(goal)
+    duration = robot.get_state().cartesian_duration_sec
+    assert 0.06 <= duration < 0.13, duration
+    samples = []
+    def finished(s):
+        samples.append((s.cycles, s.command, s.command_velocity))
+        return s.cartesian_consumed_sequence == sequence and not s.cartesian_active
+    done = wait_for(finished)
+    assert done.cartesian_ik_success, done.cartesian_ik_error
+    assert done.cartesian_ik_solves - before >= 5
+    assert len({round(q[0], 5) for _, q, _ in samples}) >= 4
+    assert max(abs(v[0]) for _, _, v in samples) < 0.4, samples
+    np.testing.assert_allclose(robot.forward_kinematics(done.command), goal, atol=0.0002)
+    # Faster producer updates reduce the segment duration without a new config.
+    robot.queue_target_pose(goal)
+    time.sleep(0.017)
+    robot.queue_target_pose(goal)
+    fast = robot.get_state().cartesian_duration_sec
+    assert 0.01 <= fast < duration, (fast, duration)
+''', mode, feedforward=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cartesian_reset_hold_and_watchdog_cancel_pending_motion(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_cartesian('''
+    far = seed.copy()
+    far[0] += 0.8
+    robot.queue_target_pose(robot.forward_kinematics(far))
+    wait_for(lambda s: s.command[0] > seed[0] + 0.03)
+    # An A-style joint reset cancels even an unfinished Cartesian segment.
+    robot.set_target_joints([0] * 7, max_joint_speed=0.5)
+    state = wait_for(lambda s: s.command_velocity[0] < 0)
+    assert not state.cartesian_active
+    assert max(abs(v) for v in state.command_velocity[:6]) <= 0.5 + 1e-10
+    np.testing.assert_allclose(state.mit_command_velocity[:6], 0, atol=1e-12)
+    solves = state.cartesian_ik_solves
+    time.sleep(0.04)
+    assert robot.get_state().cartesian_ik_solves == solves
+    robot.hold_position()
+    held = robot.get_state().command
+    time.sleep(0.05)
+    np.testing.assert_allclose(robot.get_state().command, held, atol=1e-12)
+    # Internal IK samples must not refresh the producer's watchdog.
+    robot.queue_target_pose(robot.forward_kinematics(far))
+    wait_for(lambda s: s.cartesian_ik_valid)
+    time.sleep(0.36)
+    stopped = robot.get_state()
+    assert not stopped.cartesian_active
+    np.testing.assert_allclose(stopped.command_velocity, 0, atol=1e-12)
+    np.testing.assert_allclose(stopped.mit_command_velocity, 0, atol=1e-12)
+    time.sleep(0.04)
+    np.testing.assert_allclose(robot.get_state().command, stopped.command, atol=1e-12)
+    # No stale arrival interval after a timeout.
+    robot.queue_target_pose(robot.forward_kinematics(stopped.command))
+    assert robot.get_state().cartesian_duration_sec == 0.01
+''', mode, feedforward=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cartesian_failure_holds_without_retrying_until_next_waypoint(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_cartesian('''
+    unreachable = robot.forward_kinematics(seed)
+    unreachable[0, 3] += 10
+    sequence = robot.queue_target_pose(unreachable)
+    failed = wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
+    assert not failed.cartesian_ik_success
+    time.sleep(0.05)
+    after = robot.get_state()
+    assert after.cartesian_ik_solves == failed.cartesian_ik_solves
+    np.testing.assert_allclose(after.command, failed.command, atol=1e-12)
+    np.testing.assert_allclose(after.command_velocity, 0, atol=1e-12)
+    sequence = robot.queue_target_pose(robot.forward_kinematics(after.command))
+    recovered = wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
+    assert recovered.cartesian_ik_success
+''', mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="rebot-can-test-")
@@ -27,7 +196,8 @@ class TestRsSocketCan(unittest.TestCase):
                         "-o", str(cls.shim), "-ldl"], check=True, capture_output=True)
 
     def run_native(self, fail_setting=None, tx_failure=None, script=None,
-                   fault_case=None, control_mode="pos_vel", active_report_type=2, reply_status=True):
+                   fault_case=None, control_mode="pos_vel", active_report_type=2, reply_status=True,
+                   initial_q=None, feedforward=True):
         path = str(Path(self.temp.name) / "bus")
         if os.path.exists(path):
             os.unlink(path)
@@ -74,9 +244,10 @@ class TestRsSocketCan(unittest.TestCase):
                         vmax, tmax = (50, 36) if motor <= 3 else (33, 14)
                         v = round((2 + vmax) * 65535 / (2 * vmax))
                         t = round((3 + tmax) * 65535 / (2 * tmax))
+                        p = round(((initial_q[motor - 1] if initial_q is not None else 0) + 12.5) * 65535 / 25)
                         if motor == 6 and fault_case == "flapping_status" and cleared_at is not None:
                             send(kind, motor, struct.pack(">HHHH", 32767, v, t, 250), 2)
-                        send(kind, motor, struct.pack(">HHHH", 32767, v, t, 250), flags | mode << 6)
+                        send(kind, motor, struct.pack(">HHHH", p, v, t, 250), flags | mode << 6)
 
                     while True:
                         if select.select([connection], [], [], 0.002)[0]:
@@ -126,6 +297,7 @@ class TestRsSocketCan(unittest.TestCase):
         thread.start()
         env = {**os.environ, "LD_PRELOAD": str(self.shim), "REBOT_TEST_CAN_SOCKET": path}
         env["REBOT_TEST_CONTROL_MODE"] = control_mode
+        env["REBOT_TEST_MIT_FF"] = "1" if feedforward else "0"
         env.pop("REBOT_TEST_CAN_FAILURE", None)
         if tx_failure is not None:
             env["REBOT_TEST_CAN_FAILURE"] = tx_failure

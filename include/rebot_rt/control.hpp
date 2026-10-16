@@ -50,7 +50,8 @@ struct State {
   JointArray tau{};          // N m
   JointArray target{};       // latest requested joint goal
   JointArray command{};      // position actually sent by the 100 Hz limiter
-  JointArray command_velocity{};
+  JointArray command_velocity{};      // position-ramp slope, regardless of motor mode
+  JointArray mit_command_velocity{};  // MIT dq field before direction/quantization; zero for pos_vel
   std::array<bool, kMotorCount> fresh{};
   double age_sec = 0.0;
   uint64_t cycles = 0;
@@ -58,6 +59,14 @@ struct State {
   bool running = false;
   bool fault = false;
   std::string fault_reason;
+  bool cartesian_active = false;
+  bool cartesian_ik_valid = false;
+  bool cartesian_ik_success = false;
+  double cartesian_ik_error = 0.0;
+  double cartesian_duration_sec = 0.01;
+  uint64_t cartesian_sequence = 0;
+  uint64_t cartesian_consumed_sequence = 0;
+  uint64_t cartesian_ik_solves = 0;
 };
 
 struct IKStatus {
@@ -74,7 +83,7 @@ public:
         double max_joint_speed = 0.5, double command_timeout_sec = 0.5,
         uint32_t dm_serial_baud = 921600,
         std::vector<MotorConfig> motor_configs = {},
-        std::string control_mode = "mit");
+        std::string control_mode = "mit", bool mit_velocity_feedforward = true);
   ~Robot();
   Robot(const Robot&) = delete;
   Robot& operator=(const Robot&) = delete;
@@ -90,6 +99,7 @@ public:
   void set_target_joints(const JointArray& q, std::optional<double> max_joint_speed = std::nullopt);
   void hold_position();
   IKStatus set_target_pose(const Eigen::Matrix4d& pose, double gripper = 0.0);
+  uint64_t queue_target_pose(const Eigen::Matrix4d& pose, double gripper = 0.0);
   Eigen::Matrix4d forward_kinematics() const;
   Eigen::Matrix4d forward_kinematics(const JointArray& q) const;
 
@@ -118,6 +128,7 @@ private:
 
   Family family_;
   std::string control_mode_;
+  bool mit_velocity_feedforward_;
   std::string channel_;
   std::string end_frame_;
   bool has_gripper_;
@@ -145,6 +156,16 @@ private:
   JointArray target_{};
   JointArray sent_{};
   Clock::time_point last_command_{};
+  bool cartesian_enabled_ = false;
+  bool cartesian_endpoint_ = false;
+  Eigen::Matrix4d cartesian_start_ = Eigen::Matrix4d::Identity();
+  Eigen::Matrix4d cartesian_goal_ = Eigen::Matrix4d::Identity();
+  Clock::time_point cartesian_last_update_{};
+  Clock::time_point cartesian_started_{};
+  double cartesian_gripper_ = 0.0;
+
+  void cancel_cartesian_locked();
+  void update_cartesian_target();
 
   void send_frame(uint32_t id, const std::array<uint8_t, 8>& data, bool extended = false);
   void send_special(int index, uint8_t command);

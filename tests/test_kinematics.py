@@ -54,6 +54,18 @@ class TestKinematics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown URDF frame"):
             rebot_rt.Robot(rebot_rt.Family.DM, "can0", str(urdf), "missing_frame")
 
+    def test_invalid_queued_pose_does_not_replace_a_valid_waypoint(self):
+        robot = rebot_rt.Robot(rebot_rt.Family.RS, "unused", str(self.bundled_urdf("RS_Taccap")),
+                               has_gripper=False)
+        pose = robot.forward_kinematics([0] * 7)
+        sequence = robot.queue_target_pose(pose)
+        for row, col, value in ((0, 0, float("nan")), (0, 0, 10), (3, 3, 0)):
+            invalid = pose.copy()
+            invalid[row, col] = value
+            with self.assertRaisesRegex(ValueError, "rigid"):
+                robot.queue_target_pose(invalid)
+            self.assertEqual(robot.get_state().cartesian_sequence, sequence)
+
     def test_command_speed_override_cannot_bypass_the_robot_limit(self):
         robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_Taccap")),
                                has_gripper=False, max_joint_speed=1.5)

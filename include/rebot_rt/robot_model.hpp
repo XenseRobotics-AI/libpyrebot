@@ -15,6 +15,7 @@ struct IKParams {
   double tolerance = 1e-4;
   double step_size = 0.5;
   double damping = 1e-6;
+  double max_time_sec = 0.0;  // zero leaves synchronous/offline IK iteration-limited
 };
 
 struct IKResult {

@@ -10,6 +10,7 @@
 #include <pinocchio/spatial/explog.hpp>
 
 #include <cmath>
+#include <chrono>
 #include <random>
 #include <stdexcept>
 
@@ -165,6 +166,7 @@ RobotModel::compute_error(const Eigen::VectorXd& q, const pinocchio::SE3& target
 
 IKResult RobotModel::solve_ik(const Eigen::Matrix4d& target_h, const Eigen::VectorXd& q_init,
                               int end_frame_id, const IKParams& params) const {
+  const auto started = std::chrono::steady_clock::now();
   const pinocchio::SE3 target = se3_from_homogeneous(target_h);
   // Feedback around a calibrated mechanical zero can be slightly outside the
   // URDF bounds. Project the seed before the convergence check so an exact FK
@@ -175,6 +177,9 @@ IKResult RobotModel::solve_ik(const Eigen::Matrix4d& target_h, const Eigen::Vect
   for (int iteration = 0; iteration < params.max_iter; ++iteration) {
     if (prev_err < params.tolerance)
       return IKResult{q, true, prev_err, iteration};
+    if (params.max_time_sec > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >= params.max_time_sec)
+      return IKResult{q, false, prev_err, iteration};
 
     pinocchio::computeJointJacobians(model_, data_, q);
     pinocchio::updateFramePlacements(model_, data_);

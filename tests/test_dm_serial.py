@@ -72,6 +72,35 @@ class FakeDamiaoBridge:
 
 
 class TestDmSerial(unittest.TestCase):
+    def test_zero_mit_arm_velocity_keeps_position_ramp_and_gripper_independent(self):
+        bridge = FakeDamiaoBridge()
+        urdf = Path(rebot_rt.__file__).parent / "assets/DM/urdf/ReBot_Arm_DM.urdf"
+        robot = rebot_rt.Robot(rebot_rt.Family.DM, bridge.port, str(urdf),
+                               mit_velocity_feedforward=False)
+        try:
+            robot.connect()
+            robot.start()
+            robot.set_target_joints([0.2, -0.1, -0.05, 0, 0, 0, -0.4])
+            time.sleep(0.1)
+            state = robot.get_state()
+            self.assertFalse(state.fault, state.fault_reason)
+            self.assertGreater(state.command[0], 0.01)
+            self.assertGreater(state.command_velocity[0], 0.4)
+            np.testing.assert_allclose(state.mit_command_velocity[:6], 0, atol=1e-12)
+            self.assertLess(state.mit_command_velocity[6], -0.4)
+            latest = {mid: data for mid, data in bridge.frames
+                      if 1 <= mid <= 7 and data[:7] != b'\xff' * 7}
+            configs = rebot_rt.default_motor_configs(rebot_rt.Family.DM)
+            for joint in range(7):
+                data = latest[joint + 1]
+                raw_velocity = (data[2] << 4) | (data[3] >> 4)
+                vmax = configs[joint].vmax
+                actual = -vmax + raw_velocity * 2 * vmax / 4095
+                self.assertAlmostEqual(actual, state.mit_command_velocity[joint], delta=2 * vmax / 4095)
+        finally:
+            robot.close()
+            bridge.close()
+
     def test_position_velocity_mode_matches_reference_gains_and_seeds_before_enable(self):
         bridge = FakeDamiaoBridge()
         urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
