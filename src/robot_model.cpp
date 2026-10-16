@@ -216,6 +216,82 @@ IKResult RobotModel::solve_ik(const Eigen::Matrix4d& target_h, const Eigen::Vect
   return IKResult{q, false, prev_err, params.max_iter};
 }
 
+IKResult RobotModel::solve_tracking_ik(const Eigen::Matrix4d& target_h, const Eigen::VectorXd& q_init,
+                                      int end_frame_id, const Eigen::VectorXd& lower,
+                                      const Eigen::VectorXd& upper, const IKParams& params) const {
+  const auto started = std::chrono::steady_clock::now();
+  const auto expired = [&] {
+    return params.max_time_sec > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >= params.max_time_sec;
+  };
+  const pinocchio::SE3 target = se3_from_homogeneous(target_h);
+  const double initial_error = compute_error(q_init, target, end_frame_id).first;
+  if (lower.size() != model_.nq || upper.size() != model_.nq || model_.nq != model_.nv)
+    throw std::invalid_argument("tracking IK requires scalar joints and matching joint bounds");
+  if ((lower.array() > upper.array()).any())
+    return IKResult{q_init, false, initial_error, 0, false};
+
+  Eigen::VectorXd q = q_init.cwiseMax(lower).cwiseMin(upper);
+  auto [error, residual] = compute_error(q, target, end_frame_id);
+  int iteration = 0;
+  for (; iteration < params.max_iter && error >= params.tolerance && !expired(); ++iteration) {
+    Eigen::MatrixXd J = frame_jacobian_local(q, end_frame_id);
+    const pinocchio::SE3 delta = data_.oMf[static_cast<pinocchio::FrameIndex>(end_frame_id)].inverse() * target;
+    // Negative derivative of log(current^-1 * target), for a LOCAL Jacobian.
+    J = (pinocchio::Jlog6(delta.inverse()) * J).eval();
+    if (model_.nv > 6) J.rightCols(model_.nv - 6).setZero();
+
+    Eigen::MatrixXd free_J = J;
+    Eigen::VectorXd dq = Eigen::VectorXd::Zero(model_.nv);
+    // Freeze joints whose proposed step points out of an active bound, then
+    // resolve with the remaining joints so tangential motion stays possible.
+    for (int pass = 0; pass <= 6; ++pass) {
+      Eigen::Matrix<double, 6, 6> normal = free_J * free_J.transpose();
+      normal.diagonal().array() += params.damping;
+      dq = free_J.transpose() * normal.ldlt().solve(residual);
+      bool blocked = false;
+      for (int j = 0; j < std::min(6, model_.nv); ++j) {
+        if ((q[j] <= lower[j] + 1e-12 && dq[j] < 0) ||
+            (q[j] >= upper[j] - 1e-12 && dq[j] > 0)) {
+          free_J.col(j).setZero();
+          blocked = true;
+        }
+      }
+      if (!blocked) break;
+    }
+
+    bool improved = false;
+    // A projected gradient is a descent fallback if clipping the DLS step
+    // loses its descent direction. Every accepted step is checked using FK.
+    for (int method = 0; method < 2 && !improved && !expired(); ++method) {
+      if (method == 1) dq = J.transpose() * residual;
+      if (!dq.allFinite()) continue;
+      // Keep the search local even for a target many metres outside the arm.
+      const double radius = (upper - lower).maxCoeff();
+      const double largest = dq.cwiseAbs().maxCoeff();
+      if (largest > radius && largest > 0) dq *= radius / largest;
+      double alpha = 1.0;
+      for (int backtrack = 0; backtrack < 10 && !expired(); ++backtrack) {
+        Eigen::VectorXd candidate = (q + alpha * dq).cwiseMax(lower).cwiseMin(upper);
+        const auto [candidate_error, candidate_residual] = compute_error(candidate, target, end_frame_id);
+        if (std::isfinite(candidate_error) && candidate_error < error - 1e-10) {
+          q = candidate;
+          error = candidate_error;
+          residual = candidate_residual;
+          improved = true;
+          break;
+        }
+        alpha *= 0.5;
+      }
+    }
+    if (!improved) break;
+  }
+  // Never pass a failed iterate to the controller merely because it exists.
+  const bool progress = q.allFinite() && std::isfinite(error) && error < initial_error - 1e-9;
+  const bool success = error < params.tolerance && error <= initial_error + 1e-12;
+  return IKResult{q, success, error, iteration, progress};
+}
+
 IKResult RobotModel::solve_ik_with_retry(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_seed,
                                          int end_frame_id, const IKParams& params,
                                          int max_retries) const {

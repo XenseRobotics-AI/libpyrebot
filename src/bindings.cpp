@@ -53,6 +53,8 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("cartesian_active", &State::cartesian_active)
       .def_readonly("cartesian_ik_valid", &State::cartesian_ik_valid)
       .def_readonly("cartesian_ik_success", &State::cartesian_ik_success)
+      .def_readonly("cartesian_tracking_limited", &State::cartesian_tracking_limited)
+      .def_readonly("cartesian_tracking_progress", &State::cartesian_tracking_progress)
       .def_readonly("cartesian_ik_error", &State::cartesian_ik_error)
       .def_readonly("cartesian_duration_sec", &State::cartesian_duration_sec)
       .def_readonly("cartesian_sequence", &State::cartesian_sequence)

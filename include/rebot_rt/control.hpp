@@ -66,6 +66,8 @@ struct State {
   bool cartesian_active = false;
   bool cartesian_ik_valid = false;
   bool cartesian_ik_success = false;
+  bool cartesian_tracking_limited = false;  // local tracking has not reached the sampled pose
+  bool cartesian_tracking_progress = false; // a feasible error-reducing step was accepted
   double cartesian_ik_error = 0.0;
   double cartesian_duration_sec = 0.01;
   uint64_t cartesian_sequence = 0;

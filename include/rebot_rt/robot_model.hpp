@@ -23,6 +23,7 @@ struct IKResult {
   bool success = false;
   double error = 0.0;
   int iterations = 0;
+  bool progress = false;  // a feasible local step reduced the Cartesian residual
 };
 
 class RobotModel {
@@ -56,6 +57,12 @@ public:
   // 阻尼最小二乘 CLIK（target 为 4×4 齐次矩阵）。
   IKResult solve_ik(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_init,
                     int end_frame_id, const IKParams& params) const;
+
+  // Streaming IK: optimize only within this cycle's joint/velocity bounds.
+  // A non-converged result is usable only when progress is true.
+  IKResult solve_tracking_ik(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_init,
+                            int end_frame_id, const Eigen::VectorXd& lower,
+                            const Eigen::VectorXd& upper, const IKParams& params) const;
 
   IKResult solve_ik_with_retry(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_seed,
                                int end_frame_id, const IKParams& params,

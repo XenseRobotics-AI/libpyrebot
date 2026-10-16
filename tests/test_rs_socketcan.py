@@ -167,24 +167,72 @@ finally:
 ''', mode, feedforward=False)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_cartesian_failure_holds_without_retrying_until_next_waypoint(self):
+    def test_unreachable_pose_is_approached_and_reentry_remains_continuous(self):
         for mode in ("mit", "pos_vel"):
             with self.subTest(mode=mode):
                 result, _, _ = self.run_cartesian('''
+    import pinocchio as pin
+    lower = np.array([-2.8, 0, 0, -1.57, -1.57, -3.14])
+    upper = np.array([2.8, 3.14, 3.14, 1.57, 1.57, 3.14])
+    previous = robot.get_state()
+    saw_partial_progress = False
+    def stream(goal, seconds):
+        global previous, saw_partial_progress
+        deadline = time.monotonic() + seconds
+        publish = 0
+        errors = []
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= publish:
+                robot.queue_target_pose(goal)
+                publish = now + 1 / 30
+            s = robot.get_state()
+            assert not s.fault, s.fault_reason
+            if s.cycles != previous.cycles:
+                q = np.array(s.command[:6])
+                assert np.all(q >= lower - 1e-12), q
+                assert np.all(q <= upper + 1e-12), q
+                assert np.max(np.abs(s.command_velocity[:6])) <= 1.5 + 1e-9
+                allowed = (s.cycles - previous.cycles) * 0.015 + 1e-9
+                assert np.max(np.abs(q - previous.command[:6])) <= allowed
+                # No distant IK branch is queued behind the limited command.
+                assert np.max(np.abs(np.array(s.target[:6]) - q)) < 0.016
+                saw_partial_progress |= s.cartesian_tracking_limited and s.cartesian_tracking_progress
+                actual = robot.forward_kinematics(s.command)
+                errors.append(np.linalg.norm(pin.log6(pin.SE3(actual).inverse() * pin.SE3(goal)).vector))
+                previous = s
+            time.sleep(0.001)
+        return errors
     unreachable = robot.forward_kinematics(seed)
-    unreachable[0, 3] += 10
-    sequence = robot.queue_target_pose(unreachable)
-    failed = wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
-    assert not failed.cartesian_ik_success
-    time.sleep(0.05)
-    after = robot.get_state()
-    assert after.cartesian_ik_solves == failed.cartesian_ik_solves
-    np.testing.assert_allclose(after.command, failed.command, atol=1e-12)
-    np.testing.assert_allclose(after.command_velocity, 0, atol=1e-12)
-    sequence = robot.queue_target_pose(robot.forward_kinematics(after.command))
-    recovered = wait_for(lambda s: s.cartesian_consumed_sequence == sequence and not s.cartesian_active)
-    assert recovered.cartesian_ik_success
-''', mode)
+    unreachable[0, 3] += 0.8
+    outside_errors = stream(unreachable, 3.0)
+    assert saw_partial_progress
+    assert outside_errors[-1] < outside_errors[0] - 0.02, outside_errors
+    assert np.max(np.diff(outside_errors)) < 0.0003, outside_errors
+    assert np.max(np.abs(np.array(previous.command[:6]) - seed[:6])) > 0.05
+    # Continued outward requests settle at a local feasible boundary instead
+    # of oscillating or accumulating an ever more distant joint target.
+    assert np.ptp(outside_errors[-20:]) < 0.0003, outside_errors[-20:]
+    assert np.max(np.abs(previous.command_velocity[:6])) < 0.03, previous.command_velocity
+    # Pull the controller back to a reachable pose; no re-enable, clutch reset,
+    # random IK restart, or replay of the outside waypoint is needed.
+    inside = seed.copy()
+    inside[0] += 0.03
+    returning = robot.forward_kinematics(inside)
+    return_errors = stream(returning, 3.0)
+    assert return_errors[-1] < 0.0003, return_errors[-10:]
+    np.testing.assert_allclose(robot.forward_kinematics(previous.command), returning, atol=0.0003)
+    assert not previous.cartesian_tracking_limited
+    # Partial IK progress must not keep itself alive after the producer stops.
+    robot.queue_target_pose(unreachable)
+    wait_for(lambda s: s.cartesian_tracking_limited and s.cartesian_tracking_progress)
+    time.sleep(0.36)
+    stopped = robot.get_state()
+    assert not stopped.cartesian_active
+    np.testing.assert_allclose(stopped.command_velocity, 0, atol=1e-12)
+    time.sleep(0.04)
+    np.testing.assert_allclose(robot.get_state().command, stopped.command, atol=1e-12)
+''', mode, feedforward=False)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @classmethod

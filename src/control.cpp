@@ -514,6 +514,8 @@ void Robot::cancel_cartesian_locked() {
   cartesian_last_update_ = {};
   state_.cartesian_active = false;
   state_.cartesian_ik_valid = false;
+  state_.cartesian_tracking_limited = false;
+  state_.cartesian_tracking_progress = false;
   // Invalidate an IK solve already in flight before a reset/hold/new session.
   ++state_.cartesian_sequence;
 }
@@ -580,10 +582,18 @@ void Robot::update_cartesian_target() {
     if (from.dot(to) < 0.0) to.coeffs() *= -1.0;
     sample.block<3, 3>(0, 0) = from.slerp(alpha, to).normalized().toRotationMatrix();
     rebotarm::IKParams params;
-    params.max_iter = 150;
+    params.max_iter = 40;
     params.tolerance = 1e-4;
+    params.damping = 1e-4;
     params.max_time_sec = 0.003;  // Reserve the rest of the 10 ms cycle for CAN and feedback.
-    result = model_.solve_ik(sample, model_q(seed), frame_id_, params);
+    const Eigen::VectorXd q_seed = model_q(seed);
+    Eigen::VectorXd lower = q_seed, upper = q_seed;
+    const double step = max_joint_speed_ * 0.01;
+    for (int i = 0; i < kArmDof; ++i) {
+      lower[i] = std::max(motors_[i].lower, seed[i] - step);
+      upper[i] = std::min(motors_[i].upper, seed[i] + step);
+    }
+    result = model_.solve_tracking_ik(sample, q_seed, frame_id_, lower, upper, params);
   }
   std::lock_guard<std::mutex> lock(mutex_);
   if (!cartesian_enabled_ || state_.cartesian_sequence != sequence || state_.fault ||
@@ -591,24 +601,33 @@ void Robot::update_cartesian_target() {
   state_.cartesian_consumed_sequence = sequence;
   state_.cartesian_ik_valid = true;
   state_.cartesian_ik_success = result.success;
+  state_.cartesian_tracking_limited = !result.success;
+  state_.cartesian_tracking_progress = result.progress;
   state_.cartesian_ik_error = result.error;
   ++state_.cartesian_ik_solves;
   cartesian_start_ = start;
   cartesian_started_ = started;
-  if (!result.success) {
-    // Hold the last command immediately; retry only on a new producer waypoint.
-    target_ = sent_;
-    state_.cartesian_active = false;
+  if (has_gripper_) target_[kArmDof] = gripper;
+  if (!result.success && !result.progress) {
+    // No feasible descent this tick: hold the arm, but keep the segment alive
+    // until its endpoint. A later sample may move inward or along a boundary.
+    for (int i = 0; i < kArmDof; ++i) target_[i] = sent_[i];
+    cartesian_endpoint_ = alpha >= 1.0;
     return;
+  }
+  if (!result.q.allFinite()) {
+    target_ = sent_;
+    throw std::runtime_error("Cartesian tracking IK produced a non-finite joint target");
   }
   for (int i = 0; i < kArmDof; ++i) {
     if (!std::isfinite(result.q[i]) || result.q[i] < motors_[i].lower || result.q[i] > motors_[i].upper)
       throw std::runtime_error("Cartesian IK produced an invalid joint target");
     target_[i] = result.q[i];
   }
-  if (has_gripper_) target_[kArmDof] = gripper;
   target_joint_speed_ = max_joint_speed_;
-  cartesian_endpoint_ = alpha >= 1.0;
+  // A partial local solution is a step toward the endpoint, not completion.
+  // Continue with the same waypoint until convergence, no progress, or timeout.
+  cartesian_endpoint_ = alpha >= 1.0 && result.success;
 }
 
 Eigen::Matrix4d Robot::forward_kinematics() const { return forward_kinematics(get_state().q); }
