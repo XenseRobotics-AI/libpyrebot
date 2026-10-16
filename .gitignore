@@ -1,3 +1,5 @@
 build/
 *.egg-info/
 rebot_rt/_native*.so
+__pycache__/
+*.py[cod]
