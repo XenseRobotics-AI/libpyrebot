@@ -52,6 +52,9 @@ struct State {
   JointArray command{};      // position actually sent by the 100 Hz limiter
   JointArray command_velocity{};      // position-ramp slope, regardless of motor mode
   JointArray mit_command_velocity{};  // MIT dq field before direction/quantization; zero for pos_vel
+  JointArray joint_speed_limits{};    // effective command limits, including a reset override
+  JointArray joint_speed_utilization{}; // abs(command_velocity) / effective limit
+  double joint_step_scale = 1.0;      // final coordinated joint-space limiter
   std::array<bool, kMotorCount> fresh{};
   JointArray feedback_age_sec{};
   std::array<uint64_t, kMotorCount> feedback_count{};
@@ -68,6 +71,9 @@ struct State {
   bool cartesian_ik_success = false;
   bool cartesian_tracking_limited = false;  // local tracking has not reached the sampled pose
   bool cartesian_tracking_progress = false; // a feasible error-reducing step was accepted
+  bool cartesian_coordinated = false; // sampled Cartesian direction preserved within IK tolerance
+  double cartesian_step_scale = 0.0;  // fraction of this tick's Cartesian sample; 0 for fallback
+  int cartesian_limiting_joint = -1;  // zero-based joint bounding the linearized step, -1 if none
   double cartesian_ik_error = 0.0;
   double cartesian_duration_sec = 0.01;
   uint64_t cartesian_sequence = 0;
@@ -89,7 +95,8 @@ public:
         double max_joint_speed = 0.5, double command_timeout_sec = 0.5,
         uint32_t dm_serial_baud = 921600,
         std::vector<MotorConfig> motor_configs = {},
-        std::string control_mode = "mit", bool mit_velocity_feedforward = true);
+        std::string control_mode = "mit", bool mit_velocity_feedforward = true,
+        std::vector<double> max_joint_speeds = {}, bool coordinate_cartesian_speed = true);
   ~Robot();
   Robot(const Robot&) = delete;
   Robot& operator=(const Robot&) = delete;
@@ -139,7 +146,9 @@ private:
   std::string end_frame_;
   bool has_gripper_;
   double max_joint_speed_;
-  double target_joint_speed_;
+  JointArray joint_speed_limits_{};
+  JointArray target_speed_limits_{};
+  bool coordinate_cartesian_speed_;
   double command_timeout_sec_;
   uint32_t dm_serial_baud_;
   rebotarm::RobotModel model_;

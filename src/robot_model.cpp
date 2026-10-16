@@ -292,6 +292,73 @@ IKResult RobotModel::solve_tracking_ik(const Eigen::Matrix4d& target_h, const Ei
   return IKResult{q, success, error, iteration, progress};
 }
 
+IKResult RobotModel::solve_coordinated_tracking_ik(
+    const Eigen::Matrix4d& target_h, const Eigen::VectorXd& q_init, int end_frame_id,
+    const Eigen::VectorXd& lower, const Eigen::VectorXd& upper, const IKParams& params) const {
+  const auto started = std::chrono::steady_clock::now();
+  const double budget = params.max_time_sec > 0 ? params.max_time_sec : 0.003;
+  const auto elapsed = [&] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  };
+  const pinocchio::SE3 target = se3_from_homogeneous(target_h);
+  const double initial_error = compute_error(q_init, target, end_frame_id).first;
+  if (lower.size() != model_.nq || upper.size() != model_.nq || model_.nq != model_.nv)
+    throw std::invalid_argument("tracking IK requires scalar joints and matching joint bounds");
+  if (initial_error < params.tolerance && (q_init.array() >= lower.array()).all() &&
+      (q_init.array() <= upper.array()).all())
+    return IKResult{q_init, true, initial_error, 0, false, true, 1.0, -1};
+
+  const pinocchio::SE3 current = data_.oMf[static_cast<pinocchio::FrameIndex>(end_frame_id)];
+  Eigen::Matrix<double, 6, 1> twist;
+  // Derivative of linear translation + shortest-path rotation, in LOCAL coordinates.
+  twist.head<3>() = current.rotation().transpose() * (target.translation() - current.translation());
+  twist.tail<3>() = pinocchio::log3(current.rotation().transpose() * target.rotation());
+  Eigen::MatrixXd J = frame_jacobian_local(q_init, end_frame_id).leftCols(6);
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  svd.setThreshold(1e-6);
+  const Eigen::VectorXd dq = svd.solve(twist);
+  double scale = 1.0;
+  int limiting_joint = -1;
+  for (int i = 0; i < 6; ++i) {
+    if (std::abs(dq[i]) < 1e-12) continue;
+    const double room = dq[i] > 0 ? upper[i] - q_init[i] : q_init[i] - lower[i];
+    const double ratio = std::max(0.0, room) / std::abs(dq[i]);
+    if (ratio < scale) { scale = ratio; limiting_joint = i; }
+  }
+  if (scale < 1.0) scale *= 0.95;  // leave room for nonlinear IK correction
+  const Eigen::Quaterniond from(current.rotation()), to(target.rotation());
+  int iterations = 0;
+  // Reserve part of the same budget for the boundary-approach fallback. Near a
+  // singularity a pseudoinverse need not preserve the requested twist; FK, not
+  // the linearization, decides whether a scaled Cartesian sample is feasible.
+  for (int attempt = 0; attempt < 8 && scale > 1e-5 && elapsed() < budget * 0.65; ++attempt) {
+    Eigen::Matrix4d sample = Eigen::Matrix4d::Identity();
+    sample.block<3, 1>(0, 3) = current.translation() + scale * (target.translation() - current.translation());
+    sample.block<3, 3>(0, 0) = from.slerp(scale, to).normalized().toRotationMatrix();
+    IKParams local = params;
+    local.damping = 1e-8;
+    local.tolerance = std::min(1e-6, initial_error * scale * 0.01);
+    local.max_time_sec = budget * 0.65 - elapsed();
+    if (local.max_time_sec <= 0) break;
+    auto result = solve_tracking_ik(sample, q_init, end_frame_id, lower, upper, local);
+    iterations += result.iterations;
+    if (result.success) {
+      const double error = compute_error(result.q, target, end_frame_id).first;
+      if (std::isfinite(error) && error < initial_error - 1e-9)
+        return IKResult{result.q, error < params.tolerance, error, iterations, true, true, scale, limiting_joint};
+    }
+    scale *= 0.5;
+  }
+  IKParams fallback = params;
+  fallback.max_time_sec = budget - elapsed();
+  if (fallback.max_time_sec <= 0)
+    return IKResult{q_init, false, initial_error, iterations, false, false, 0.0, limiting_joint};
+  auto result = solve_tracking_ik(target_h, q_init, end_frame_id, lower, upper, fallback);
+  result.iterations += iterations;
+  result.limiting_joint = limiting_joint;
+  return result;
+}
+
 IKResult RobotModel::solve_ik_with_retry(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_seed,
                                          int end_frame_id, const IKParams& params,
                                          int max_retries) const {

@@ -91,6 +91,20 @@ class TestKinematics(unittest.TestCase):
                 self.assertTrue(result.success)
                 self.assertLess(np.linalg.norm(implicit.forward_kinematics(result.target) - target), 2e-4)
 
+    def test_per_joint_limits_validation_and_scalar_override(self):
+        urdf = str(self.bundled_urdf("RS_Taccap"))
+        for limits in ([1] * 5, [1] * 7, [0] * 6, [-1] * 6, [float("nan")] * 6, [float("inf")] * 6):
+            with self.subTest(limits=limits), self.assertRaisesRegex(ValueError, "max_joint_speeds"):
+                rebot_rt.Robot(rebot_rt.Family.RS, "unused", urdf, max_joint_speeds=limits)
+        limits = [0.2, 0.8, 1.1, 0.9, 0.7, 0.6]
+        robot = rebot_rt.Robot(rebot_rt.Family.RS, "unused", urdf, max_joint_speeds=limits)
+        robot.set_target_joints([0] * 7)
+        np.testing.assert_allclose(robot.get_state().joint_speed_limits[:6], limits)
+        robot.set_target_joints([0] * 7, max_joint_speed=0.5)
+        np.testing.assert_allclose(robot.get_state().joint_speed_limits[:6], np.minimum(limits, 0.5))
+        with self.assertRaisesRegex(ValueError, "max_joint_speed"):
+            robot.set_target_joints([0] * 7, max_joint_speed=1.2)
+
     def test_pose_below_zero_joint_limits_is_rejected_without_changing_command(self):
         robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_Taccap")),
                                has_gripper=False)

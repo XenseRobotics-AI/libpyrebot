@@ -24,6 +24,9 @@ struct IKResult {
   double error = 0.0;
   int iterations = 0;
   bool progress = false;  // a feasible local step reduced the Cartesian residual
+  bool coordinated = false;
+  double step_scale = 0.0;
+  int limiting_joint = -1;
 };
 
 class RobotModel {
@@ -63,6 +66,12 @@ public:
   IKResult solve_tracking_ik(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_init,
                             int end_frame_id, const Eigen::VectorXd& lower,
                             const Eigen::VectorXd& upper, const IKParams& params) const;
+
+  // Try a common translation/rotation progress scale before bounded residual
+  // minimization. Falls back to local feasible approach at unreachable boundaries.
+  IKResult solve_coordinated_tracking_ik(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_init,
+                                        int end_frame_id, const Eigen::VectorXd& lower,
+                                        const Eigen::VectorXd& upper, const IKParams& params) const;
 
   IKResult solve_ik_with_retry(const Eigen::Matrix4d& target, const Eigen::VectorXd& q_seed,
                                int end_frame_id, const IKParams& params,

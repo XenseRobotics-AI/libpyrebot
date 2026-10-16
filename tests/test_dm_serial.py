@@ -72,6 +72,30 @@ class FakeDamiaoBridge:
 
 
 class TestDmSerial(unittest.TestCase):
+    def test_per_joint_speed_limits_reach_dm_position_packets(self):
+        bridge = FakeDamiaoBridge()
+        urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+        limits = [0.2, 0.8, 1.1, 0.9, 0.7, 0.6]
+        robot = rebot_rt.Robot(rebot_rt.Family.DM, bridge.port, str(urdf), has_gripper=False,
+                               control_mode="pos_vel", max_joint_speeds=limits)
+        try:
+            robot.connect()
+            robot.start()
+            robot.set_target_joints([0.2] * 6 + [0])
+            time.sleep(0.08)
+            state = robot.get_state()
+            self.assertFalse(state.fault, state.fault_reason)
+            # All six positions share one progress scale; the slowest is J1.
+            np.testing.assert_allclose(state.command_velocity[:6], 0.2, atol=1e-10)
+            latest = {mid: data for mid, data in bridge.frames if 0x101 <= mid <= 0x106}
+            self.assertEqual(len(latest), 6)
+            for i, limit in enumerate(limits):
+                _, speed = struct.unpack("<ff", latest[0x101 + i])
+                self.assertAlmostEqual(speed, limit)
+        finally:
+            robot.close()
+            bridge.close()
+
     def test_zero_mit_arm_velocity_keeps_position_ramp_and_gripper_independent(self):
         bridge = FakeDamiaoBridge()
         urdf = Path(rebot_rt.__file__).parent / "assets/DM/urdf/ReBot_Arm_DM.urdf"

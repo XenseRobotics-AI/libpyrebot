@@ -182,10 +182,12 @@ std::array<MotorConfig, kMotorCount> default_motor_configs(Family family) {
 Robot::Robot(Family family, std::string channel, std::string urdf_path,
              std::string end_frame, bool has_gripper, double max_joint_speed,
              double command_timeout_sec, uint32_t dm_serial_baud,
-             std::vector<MotorConfig> motor_configs, std::string control_mode, bool mit_velocity_feedforward)
+             std::vector<MotorConfig> motor_configs, std::string control_mode, bool mit_velocity_feedforward,
+             std::vector<double> max_joint_speeds, bool coordinate_cartesian_speed)
     : family_(family), control_mode_(std::move(control_mode)), mit_velocity_feedforward_(mit_velocity_feedforward),
       channel_(std::move(channel)), end_frame_(std::move(end_frame)),
-      has_gripper_(has_gripper), max_joint_speed_(max_joint_speed), target_joint_speed_(max_joint_speed),
+      has_gripper_(has_gripper), max_joint_speed_(max_joint_speed),
+      coordinate_cartesian_speed_(coordinate_cartesian_speed),
       command_timeout_sec_(command_timeout_sec), dm_serial_baud_(dm_serial_baud), model_(urdf_path),
       frame_id_(end_frame_.empty() ? model_.end_effector_frame_id() : model_.frame_id(end_frame_)) {
   if (channel_.empty()) throw std::invalid_argument("channel must not be empty");
@@ -202,6 +204,15 @@ Robot::Robot(Family family, std::string channel, std::string urdf_path,
     throw std::invalid_argument("speed and timeout must be finite and positive");
   if (!motor_configs.empty() && motor_configs.size() != kMotorCount)
     throw std::invalid_argument("motor_configs must contain exactly seven motors");
+  if (!max_joint_speeds.empty() && max_joint_speeds.size() != kArmDof)
+    throw std::invalid_argument("max_joint_speeds must contain exactly six finite positive speeds");
+  joint_speed_limits_.fill(max_joint_speed_);
+  for (int i = 0; i < kArmDof; ++i) {
+    if (!max_joint_speeds.empty()) joint_speed_limits_[i] = max_joint_speeds[i];
+    if (!std::isfinite(joint_speed_limits_[i]) || joint_speed_limits_[i] <= 0)
+      throw std::invalid_argument("max_joint_speeds must contain exactly six finite positive speeds");
+  }
+  target_speed_limits_ = joint_speed_limits_;
   const auto defaults = default_motor_configs(family_);
   const auto limits = model_.joint_limits();
   for (int i = 0; i < kMotorCount; ++i) {
@@ -229,6 +240,9 @@ Robot::Robot(Family family, std::string channel, std::string urdf_path,
         throw std::invalid_argument("duplicate motor or feedback ID");
     }
     m.send_id = config.send_id; m.feedback_id = config.feedback_id;
+    if (i < kArmDof && joint_speed_limits_[i] > config.vmax)
+      throw std::invalid_argument("joint speed limit exceeds motor velocity encoding range at joint " +
+                                  std::to_string(i + 1));
     m.pmax = config.pmax; m.vmax = config.vmax; m.tmax = config.tmax;
     m.kp = config.kp; m.kd = config.kd;
     m.vel_kp = config.vel_kp; m.vel_ki = config.vel_ki;
@@ -355,7 +369,7 @@ void Robot::connect() {
     target_ = state_.q;
     sent_ = target_;
     cancel_cartesian_locked();
-    target_joint_speed_ = max_joint_speed_;
+    target_speed_limits_ = joint_speed_limits_;
     state_.command_velocity.fill(0.0);
     state_.mit_command_velocity.fill(0.0);
     last_command_ = Clock::now();
@@ -377,7 +391,7 @@ void Robot::start() {
   if (family_ == Family::RS) {
     for (int i = 0; i < kArmDof; ++i) {
       if (!position_mode(i)) continue;
-      const auto speed = float_bits(max_joint_speed_);
+      const auto speed = float_bits(joint_speed_limits_[i]);
       write_setting(i, 0x7017, speed);
       if (read_setting(i, 0x7017) != speed)
         throw std::runtime_error("RS motor " + std::to_string(i + 1) + " speed limit readback mismatch");
@@ -406,7 +420,7 @@ void Robot::start() {
     target_ = state_.q;
     sent_ = target_;
     cancel_cartesian_locked();
-    target_joint_speed_ = max_joint_speed_;
+    target_speed_limits_ = joint_speed_limits_;
     last_command_ = Clock::now();
     state_.command_velocity.fill(0.0);
     state_.mit_command_velocity.fill(0.0);
@@ -435,6 +449,7 @@ State Robot::get_state() const {
   State copy = state_;
   copy.target = target_;
   copy.command = sent_;
+  copy.joint_speed_limits = target_speed_limits_;
   const auto now = Clock::now();
   copy.running = running();
   copy.age_sec = 0.0;
@@ -454,8 +469,9 @@ JointArray Robot::get_target_joints() const {
 }
 
 void Robot::set_target_joints(const JointArray& q, std::optional<double> max_joint_speed) {
-  const double speed = max_joint_speed.value_or(max_joint_speed_);
-  if (!std::isfinite(speed) || speed <= 0 || speed > max_joint_speed_)
+  const double largest_limit = *std::max_element(joint_speed_limits_.begin(), joint_speed_limits_.begin() + kArmDof);
+  const double speed = max_joint_speed.value_or(largest_limit);
+  if (!std::isfinite(speed) || speed <= 0 || speed > largest_limit)
     throw std::invalid_argument("target max_joint_speed must be finite, positive and at most the robot limit");
   for (int i = 0; i < kMotorCount; ++i) {
     if (!std::isfinite(q[i])) throw std::invalid_argument("non-finite joint target");
@@ -466,7 +482,9 @@ void Robot::set_target_joints(const JointArray& q, std::optional<double> max_joi
   if (state_.fault) throw std::runtime_error("control fault: " + state_.fault_reason);
   cancel_cartesian_locked();
   target_ = q;
-  target_joint_speed_ = speed;
+  target_speed_limits_ = joint_speed_limits_;
+  for (int i = 0; i < kArmDof; ++i)
+    target_speed_limits_[i] = std::min(joint_speed_limits_[i], speed);
   last_command_ = Clock::now();
 }
 
@@ -516,6 +534,9 @@ void Robot::cancel_cartesian_locked() {
   state_.cartesian_ik_valid = false;
   state_.cartesian_tracking_limited = false;
   state_.cartesian_tracking_progress = false;
+  state_.cartesian_coordinated = false;
+  state_.cartesian_step_scale = 0.0;
+  state_.cartesian_limiting_joint = -1;
   // Invalidate an IK solve already in flight before a reset/hold/new session.
   ++state_.cartesian_sequence;
 }
@@ -588,12 +609,14 @@ void Robot::update_cartesian_target() {
     params.max_time_sec = 0.003;  // Reserve the rest of the 10 ms cycle for CAN and feedback.
     const Eigen::VectorXd q_seed = model_q(seed);
     Eigen::VectorXd lower = q_seed, upper = q_seed;
-    const double step = max_joint_speed_ * 0.01;
     for (int i = 0; i < kArmDof; ++i) {
+      const double step = joint_speed_limits_[i] * 0.01;
       lower[i] = std::max(motors_[i].lower, seed[i] - step);
       upper[i] = std::min(motors_[i].upper, seed[i] + step);
     }
-    result = model_.solve_tracking_ik(sample, q_seed, frame_id_, lower, upper, params);
+    result = coordinate_cartesian_speed_
+        ? model_.solve_coordinated_tracking_ik(sample, q_seed, frame_id_, lower, upper, params)
+        : model_.solve_tracking_ik(sample, q_seed, frame_id_, lower, upper, params);
   }
   std::lock_guard<std::mutex> lock(mutex_);
   if (!cartesian_enabled_ || state_.cartesian_sequence != sequence || state_.fault ||
@@ -603,6 +626,9 @@ void Robot::update_cartesian_target() {
   state_.cartesian_ik_success = result.success;
   state_.cartesian_tracking_limited = !result.success;
   state_.cartesian_tracking_progress = result.progress;
+  state_.cartesian_coordinated = result.coordinated;
+  state_.cartesian_step_scale = result.step_scale;
+  state_.cartesian_limiting_joint = result.limiting_joint;
   state_.cartesian_ik_error = result.error;
   ++state_.cartesian_ik_solves;
   cartesian_start_ = start;
@@ -624,7 +650,7 @@ void Robot::update_cartesian_target() {
       throw std::runtime_error("Cartesian IK produced an invalid joint target");
     target_[i] = result.q[i];
   }
-  target_joint_speed_ = max_joint_speed_;
+  target_speed_limits_ = joint_speed_limits_;
   // A partial local solution is a step toward the endpoint, not completion.
   // Continue with the same waypoint until convergence, no progress, or timeout.
   cartesian_endpoint_ = alpha >= 1.0 && result.success;
@@ -882,7 +908,7 @@ void Robot::send_position(int index, double q) {
   } else {
     std::array<uint8_t, 8> data{};
     put_u32(data, 0, position);
-    put_u32(data, 4, float_bits(max_joint_speed_));
+    put_u32(data, 4, float_bits(joint_speed_limits_[index]));
     send_frame(0x100 + m.send_id, data);
   }
 }
@@ -1165,12 +1191,13 @@ void Robot::run() noexcept {
           cancel_cartesian_locked();
           target_ = sent_;
         }
-        const double arm_step = target_joint_speed_ * 0.01;
         const double gripper_step = max_joint_speed_ * 0.01;
-        double largest_arm_delta = 0.0;
-        for (int i = 0; i < kArmDof; ++i)
-          largest_arm_delta = std::max(largest_arm_delta, std::abs(target_[i] - sent_[i]));
-        const double arm_scale = largest_arm_delta > arm_step ? arm_step / largest_arm_delta : 1.0;
+        double arm_scale = 1.0;
+        for (int i = 0; i < kArmDof && !timed_out; ++i) {
+          const double delta = std::abs(target_[i] - sent_[i]);
+          if (delta > 0) arm_scale = std::min(arm_scale, target_speed_limits_[i] * 0.01 / delta);
+        }
+        state_.joint_step_scale = arm_scale;
         for (int i = 0; i < kMotorCount; ++i) {
           const auto goal = timed_out ? sent_[i] : target_[i];
           // Scale the six arm joints together so they make equal progress
@@ -1180,6 +1207,7 @@ void Robot::run() noexcept {
           sent_[i] += delta;
           command[i] = sent_[i];
           velocity[i] = delta / 0.01;
+          state_.joint_speed_utilization[i] = std::abs(velocity[i]) / target_speed_limits_[i];
           // A finite difference of piecewise Cartesian/IK samples is not a
           // continuous velocity trajectory. In MIT it also enters the Kd
           // term directly, exposing waypoint-boundary ripple as torque kicks.

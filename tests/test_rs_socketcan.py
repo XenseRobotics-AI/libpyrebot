@@ -49,10 +49,13 @@ finally:
     robot.close()
 '''
 
-    def run_cartesian(self, body, mode, feedforward=True):
+    def run_cartesian(self, body, mode, feedforward=True, speeds=None, initial_q=None, coordinated=True):
         return self.run_native(
-            script=self.CARTESIAN_SCRIPT.replace("    BODY", body), control_mode=mode,
-            initial_q=[0.15, 0.6, 0.5, -0.25, 0.2, 0.1],
+            script=self.CARTESIAN_SCRIPT.replace("    BODY", body).replace(
+                "command_timeout_sec=0.3)",
+                f"command_timeout_sec=0.3, max_joint_speeds={speeds or []!r}, "
+                f"coordinate_cartesian_speed={coordinated!r})"), control_mode=mode,
+            initial_q=initial_q or [0.15, 0.6, 0.5, -0.25, 0.2, 0.1],
             active_report_type=24, reply_status=False,
             feedforward=feedforward,
         )
@@ -235,6 +238,81 @@ finally:
 ''', mode, feedforward=False)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_tcp_x_rotation_keeps_tip_fixed_with_unequal_joint_limits(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, registers = self.run_cartesian('''
+    import pinocchio as pin
+    limits = np.array([0.3, 1.5, 1.5, 1.5, 0.6, 1.5])
+    origin = robot.forward_kinematics(seed)
+    goal = origin.copy()
+    goal[:3, :3] = origin[:3, :3] @ pin.exp3(np.array([0.12, 0., 0.]))
+    deadline = time.monotonic() + 1.6
+    previous = robot.get_state()
+    publish = 0
+    angles, offsets, off_axis = [], [], []
+    limited = set()
+    while time.monotonic() < deadline:
+        if time.monotonic() >= publish:
+            robot.queue_target_pose(goal)
+            publish = time.monotonic() + 1 / 30
+        s = robot.get_state()
+        assert not s.fault, s.fault_reason
+        if s.cycles != previous.cycles:
+            np.testing.assert_allclose(s.joint_speed_limits[:6], limits)
+            assert np.all(np.abs(s.command_velocity[:6]) <= limits + 1e-9)
+            assert np.all(np.abs(np.array(s.command[:6]) - previous.command[:6]) <=
+                          limits * 0.01 * (s.cycles - previous.cycles) + 1e-9)
+            pose = robot.forward_kinematics(s.command)
+            rotation = pin.log3(origin[:3, :3].T @ pose[:3, :3])
+            angles.append(rotation[0])
+            offsets.append(np.linalg.norm(pose[:3, 3] - origin[:3, 3]))
+            off_axis.append(np.linalg.norm(rotation[1:]))
+            if s.cartesian_ik_valid and s.cartesian_tracking_progress:
+                assert s.cartesian_coordinated
+                if s.cartesian_step_scale < 0.99:
+                    limited.add(s.cartesian_limiting_joint)
+            previous = s
+        time.sleep(0.001)
+    assert 0 in limited, limited  # J1, not the wrist, bounds this motion
+    assert max(offsets) < 2e-5, max(offsets)
+    assert max(off_axis) < 2e-5, max(off_axis)
+    assert min(np.diff(angles)) > -1e-5, angles
+    assert abs(angles[-1] - 0.12) < 0.0002, angles[-1]
+''', mode, feedforward=False, speeds=[0.3, 1.5, 1.5, 1.5, 0.6, 1.5],
+                    initial_q=[0.2193, 0.4063, 0.3952, -0.0846, 0.0668, -0.1274])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if mode == "pos_vel":
+                    for motor, limit in enumerate([0.3, 1.5, 1.5, 1.5, 0.6, 1.5], 1):
+                        self.assertAlmostEqual(struct.unpack("<f", registers[motor, 0x7017])[0], limit)
+
+    def test_per_joint_limits_apply_to_joint_moves_reset_and_resume(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_cartesian('''
+    limits = np.array([0.2, 0.8, 1.1, 0.9, 0.7, 0.6])
+    goal = seed.copy()
+    goal[:6] += 0.1
+    robot.set_target_joints(goal)
+    s = wait_for(lambda s: s.command_velocity[0] > 0.19)
+    np.testing.assert_allclose(s.command_velocity[:6], 0.2, atol=1e-10)
+    np.testing.assert_allclose(s.joint_speed_utilization[:6], 0.2 / limits)
+    # A scalar reset cap must not increase an individual joint's lower limit.
+    robot.set_target_joints([0] * 7, max_joint_speed=0.5)
+    s = wait_for(lambda s: s.command_velocity[0] < 0)
+    np.testing.assert_allclose(s.joint_speed_limits[:6], np.minimum(limits, 0.5))
+    assert np.all(np.abs(s.command_velocity[:6]) <= np.minimum(limits, 0.5) + 1e-10)
+    robot.queue_target_pose(robot.forward_kinematics(goal))
+    wait_for(lambda s: s.cartesian_tracking_progress)
+    np.testing.assert_allclose(robot.get_state().joint_speed_limits[:6], limits)
+    robot.hold_position()
+    s = wait_for(lambda s: max(np.abs(s.command_velocity)) == 0)
+    assert not s.cartesian_coordinated
+    assert s.cartesian_step_scale == 0
+    assert s.cartesian_limiting_joint == -1
+''', mode, feedforward=False, speeds=[0.2, 0.8, 1.1, 0.9, 0.7, 0.6])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="rebot-can-test-")
@@ -390,7 +468,7 @@ finally:
                                 capture_output=True, timeout=15)
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
-        self.assertFalse(errors, errors)
+        self.assertFalse(errors, f"{errors}\n{result.stdout}\n{result.stderr}")
         return result, frames, registers
 
     def run_feedback_pause(self, mode, silent=False):
