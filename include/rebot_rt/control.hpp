@@ -112,6 +112,8 @@ private:
     double lower = -12.5;
     double upper = 12.5;
     Clock::time_point last_feedback{};
+    uint8_t rs_status_flags = 0;
+    uint8_t rs_run_state = 0;
   };
 
   Family family_;
@@ -130,6 +132,8 @@ private:
   uint16_t awaited_setting_ = 0;
   uint32_t setting_value_ = 0;
   bool setting_received_ = false;
+  bool rs_startup_recovery_ = false;
+  Clock::time_point rs_unhealthy_at_{};
   int fd_ = -1;
   bool serial_ = false;
   std::vector<uint8_t> serial_rx_;
@@ -148,6 +152,7 @@ private:
                        const std::array<uint8_t, 8>& data);
   void send_rs_mit(int index, const std::array<uint8_t, 8>& data, uint16_t torque);
   void request_feedback(int index);
+  void recover_rs_startup_faults();
   bool position_mode(int index) const { return index < kArmDof && control_mode_ == "pos_vel"; }
   uint32_t read_setting(int index, uint16_t setting);
   void write_setting(int index, uint16_t setting, uint32_t value);

@@ -26,7 +26,8 @@ class TestRsSocketCan(unittest.TestCase):
         subprocess.run(["cc", "-shared", "-fPIC", str(Path(__file__).with_name("socketcan_shim.c")),
                         "-o", str(cls.shim), "-ldl"], check=True, capture_output=True)
 
-    def run_native(self, fail_setting=None, tx_failure=None, script=None):
+    def run_native(self, fail_setting=None, tx_failure=None, script=None,
+                   fault_case=None, control_mode="pos_vel", active_report_type=2, reply_status=True):
         path = str(Path(self.temp.name) / "bus")
         if os.path.exists(path):
             os.unlink(path)
@@ -42,15 +43,40 @@ class TestRsSocketCan(unittest.TestCase):
                 connection, _ = server.accept()
                 with connection:
                     next_status = time.monotonic()
+                    cleared_at = None
+                    fault_reported = False
+                    runtime_fault_sent = False
+                    enabled = set()
 
-                    def send(kind, motor, data):
-                        connection.sendall(FRAME.pack(0x80000000 | kind << 24 | motor << 8 | 0xFD, 8, data))
+                    def send(kind, motor, data, status_bits=0):
+                        connection.sendall(FRAME.pack(
+                            0x80000000 | kind << 24 | status_bits << 16 | motor << 8 | 0xFD, 8, data))
 
-                    def status(motor):
+                    def status(motor, kind=2):
+                        nonlocal fault_reported
+                        flags = 0
+                        mode = 2 if motor in enabled else 0
+                        if motor == 6:
+                            if fault_case == "silent_after_clear" and cleared_at is not None:
+                                return
+                            if fault_case in ("latched", "persistent_status"):
+                                if fault_case == "persistent_status" or cleared_at is None or \
+                                        time.monotonic() - cleared_at < 0.03:
+                                    flags = 2
+                            if fault_case == "not_disabled" and cleared_at is not None:
+                                mode = 2
+                            if not fault_reported and (
+                                (fault_case == "latched" and cleared_at is None) or
+                                (fault_case == "persistent_report" and cleared_at is not None)
+                            ):
+                                send(21, motor, struct.pack("<II", 2, 0))
+                                fault_reported = True
                         vmax, tmax = (50, 36) if motor <= 3 else (33, 14)
                         v = round((2 + vmax) * 65535 / (2 * vmax))
                         t = round((3 + tmax) * 65535 / (2 * tmax))
-                        send(2, motor, struct.pack(">HHHH", 32767, v, t, 250))
+                        if motor == 6 and fault_case == "flapping_status" and cleared_at is not None:
+                            send(kind, motor, struct.pack(">HHHH", 32767, v, t, 250), 2)
+                        send(kind, motor, struct.pack(">HHHH", 32767, v, t, 250), flags | mode << 6)
 
                     while True:
                         if select.select([connection], [], [], 0.002)[0]:
@@ -60,6 +86,20 @@ class TestRsSocketCan(unittest.TestCase):
                             arb, _, data = FRAME.unpack(packet)
                             kind, motor = (arb >> 24) & 0x1F, arb & 0xFF
                             frames.append((kind, motor, data))
+                            if kind == 3:
+                                enabled.add(motor)
+                            elif kind == 4:
+                                enabled.discard(motor)
+                                if motor == 6 and data[0] == 1:
+                                    cleared_at = time.monotonic()
+                            is_target = kind == 1 or (kind == 18 and data[:2] == b"\x16\x70")
+                            if fault_case == "runtime" and is_target and len(enabled) == 6 \
+                                    and not runtime_fault_sent:
+                                # A single fault followed immediately by normal frames
+                                # must still stop the running controller.
+                                send(active_report_type, 6, struct.pack(">HHHH", 32767, 32767, 32767, 250),
+                                     2 | 2 << 6)
+                                runtime_fault_sent = True
                             if kind in (17, 18):
                                 setting = int.from_bytes(data[:2], "little")
                                 if kind == 18:
@@ -71,10 +111,11 @@ class TestRsSocketCan(unittest.TestCase):
                                     # An unrelated register reply must not satisfy the pending read.
                                     send(17, motor, b"\x19\x70\x00\x00" + bytes(4))
                                     send(17, motor, data[:4] + value)
-                            status(motor)
+                            if reply_status:
+                                status(motor)
                         if time.monotonic() >= next_status:
                             for motor in range(1, 7):
-                                status(motor)
+                                status(motor, active_report_type)
                             next_status = time.monotonic() + 0.01
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -84,6 +125,7 @@ class TestRsSocketCan(unittest.TestCase):
         thread = threading.Thread(target=motors, daemon=True)
         thread.start()
         env = {**os.environ, "LD_PRELOAD": str(self.shim), "REBOT_TEST_CAN_SOCKET": path}
+        env["REBOT_TEST_CONTROL_MODE"] = control_mode
         env.pop("REBOT_TEST_CAN_FAILURE", None)
         if tx_failure is not None:
             env["REBOT_TEST_CAN_FAILURE"] = tx_failure
@@ -92,12 +134,14 @@ class TestRsSocketCan(unittest.TestCase):
         default_script = '''
 import time
 import ctypes
+import os
 from pathlib import Path
 import numpy as np
 import rebot_rt
 urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
-                       has_gripper=False, control_mode="pos_vel", command_timeout_sec=0.04)
+                       has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"],
+                       command_timeout_sec=0.04)
 try:
     robot.connect()
     robot.start()
@@ -225,6 +269,102 @@ finally:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("speed limit readback mismatch", result.stderr)
         self.assertFalse(any(kind == 3 for kind, _, _ in frames))
+
+    def test_startup_clears_old_fault_and_waits_for_disabled_healthy_feedback(self):
+        for mode in ("mit", "pos_vel"):
+            with self.subTest(mode=mode):
+                result, frames, _ = self.run_native(fault_case="latched", control_mode=mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                first_enable = next(i for i, (kind, _, _) in enumerate(frames) if kind == 3)
+                for motor in range(1, 7):
+                    clears = [i for i, (kind, mid, data) in enumerate(frames)
+                              if kind == 4 and mid == motor and data[0] == 1]
+                    self.assertEqual(len(clears), 1)
+                    self.assertLess(clears[0], first_enable)
+                    self.assertTrue(any(kind == 4 and mid == motor and data[0] == 0
+                                        for kind, mid, data in frames[:clears[0]]))
+                self.assertFalse(any(kind in (6, 22) for kind, _, _ in frames))
+
+    def test_persistent_status_fault_prevents_enable(self):
+        result, frames, _ = self.run_native(fault_case="persistent_status", control_mode="mit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RS motor 6 reported status flags 2 (three-phase overcurrent)", result.stderr)
+        self.assertIn("startup fault clear failed", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_type24_reports_keep_feedback_fresh_during_startup_and_control(self):
+        # Real hardware replies to commands with type 2, but streams type 24.
+        # Also cover firmware providing only the active-report stream.
+        for mode in ("mit", "pos_vel"):
+            for reply_status in (True, False):
+                with self.subTest(mode=mode, reply_status=reply_status):
+                    result, _, _ = self.run_native(
+                        control_mode=mode, active_report_type=24, reply_status=reply_status)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_type24_persistent_fault_prevents_enable(self):
+        result, frames, _ = self.run_native(fault_case="persistent_status", control_mode="mit",
+                                            active_report_type=24, reply_status=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RS motor 6 reported status flags 2 (three-phase overcurrent)", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_new_detailed_fault_is_not_erased_by_healthy_status_frames(self):
+        result, frames, _ = self.run_native(fault_case="persistent_report", control_mode="mit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RS motor 6 reported fault mask 2 (driver chip fault)", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_intermittent_fault_with_healthy_frames_does_not_pass_startup(self):
+        result, frames, _ = self.run_native(fault_case="flapping_status", control_mode="mit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("startup fault clear failed", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_silent_motor_after_clear_prevents_enable(self):
+        result, frames, _ = self.run_native(fault_case="silent_after_clear", control_mode="mit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RS motor 6 missing fresh feedback after fault clear", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_motor_must_confirm_disabled_before_enable(self):
+        result, frames, _ = self.run_native(fault_case="not_disabled", control_mode="mit")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RS motor 6 did not confirm disabled state", result.stderr)
+        self.assertFalse(any(kind in (1, 3) for kind, _, _ in frames))
+
+    def test_runtime_fault_stays_latched_without_clear_or_automatic_reenable(self):
+        for mode, report_type in (("mit", 2), ("pos_vel", 2), ("mit", 24), ("pos_vel", 24)):
+            with self.subTest(mode=mode, report_type=report_type):
+                result, frames, _ = self.run_native(fault_case="runtime", control_mode=mode,
+                                                     active_report_type=report_type, script='''
+import os
+import time
+from pathlib import Path
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
+                       has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"])
+try:
+    robot.connect()
+    robot.start()
+    deadline = time.monotonic() + 0.5
+    while not robot.get_state().fault and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.03)
+    state = robot.get_state()
+    assert state.fault and not state.running, state.fault_reason
+    assert "RS motor 6 reported status flags 2 (three-phase overcurrent)" in state.fault_reason
+finally:
+    robot.close()
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                first_enable = next(i for i, (kind, _, _) in enumerate(frames) if kind == 3)
+                self.assertEqual(sum(kind == 3 for kind, _, _ in frames), 6)
+                self.assertFalse(any(kind == 4 and data[0] == 1
+                                     for kind, _, data in frames[first_enable:]))
+                disabled = {mid for kind, mid, data in frames[first_enable:] if kind == 4 and data[0] == 0}
+                self.assertEqual(disabled, set(range(1, 7)))
 
     def test_mode_readback_mismatch_prevents_enable(self):
         result, frames, _ = self.run_native(fail_setting=0x7005)

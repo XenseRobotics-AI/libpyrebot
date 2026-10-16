@@ -32,6 +32,19 @@ constexpr uint32_t kRsFaultReport = 21;
 constexpr uint32_t kRsActiveReport = 24;
 constexpr uint16_t kRsHostId = 0x00FD;
 
+std::string rs_status_description(uint8_t flags) {
+  const std::array<const char*, 6> names{
+      "undervoltage", "three-phase overcurrent", "overtemperature",
+      "magnetic encoder fault", "stall overload", "encoder uncalibrated"};
+  std::string result;
+  for (int bit = 0; bit < 6; ++bit) {
+    if (!(flags & (1u << bit))) continue;
+    if (!result.empty()) result += ", ";
+    result += names[bit];
+  }
+  return result;
+}
+
 uint32_t rs_ext_id(uint32_t communication_type, uint16_t extra_data, uint8_t node_id) {
   return (communication_type << 24) | (static_cast<uint32_t>(extra_data) << 8) | node_id;
 }
@@ -276,6 +289,7 @@ void Robot::connect() {
     fd_ = sock;
   }
   try {
+    if (family_ == Family::RS) recover_rs_startup_faults();
     const auto request_start = Clock::now();
     for (int i = 0; i < kMotorCount; ++i) if (i < kArmDof || has_gripper_) request_feedback(i);
     const auto deadline = request_start + std::chrono::milliseconds(250);
@@ -332,6 +346,7 @@ void Robot::connect() {
     state_.command_velocity.fill(0.0);
     last_command_ = Clock::now();
   } catch (...) {
+    disable_all();
     ::close(fd_);
     fd_ = -1;
     serial_ = false;
@@ -569,7 +584,80 @@ void Robot::request_feedback(int index) {
   } else {
     std::array<uint8_t, 8> report{1, 2, 3, 4, 5, 6, 1, 0};
     send_rs_command(index, kRsActiveReport, static_cast<uint16_t>(motors_[index].feedback_id), report);
-    send_special(index, 0xFB); // clear fault; firmware returns an operation-status frame
+    send_special(index, 0xFD); // status query while disabled; do not clear fault latches
+  }
+}
+
+void Robot::recover_rs_startup_faults() {
+  // Only connect() may recover faults. First disable the whole arm and drain
+  // pre-clear feedback, which can still carry the previous session's fault.
+  for (int i = 0; i < kMotorCount; ++i)
+    if (i < kArmDof || has_gripper_) send_special(i, 0xFD);
+  for (int i = 0; i < kMotorCount; ++i)
+    if (i < kArmDof || has_gripper_) request_feedback(i);
+  read_feedback_until(Clock::now() + std::chrono::milliseconds(60));
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_.fault = false;
+    state_.fault_reason.clear();
+    for (auto& motor : motors_) {
+      motor.last_feedback = {};
+      motor.rs_status_flags = 0x3F;
+      motor.rs_run_state = 0xFF;
+    }
+  }
+  rs_startup_recovery_ = true;
+  try {
+    // One clear attempt, never an enable or a mechanical-zero command.
+    for (int i = 0; i < kMotorCount; ++i)
+      if (i < kArmDof || has_gripper_) send_special(i, 0xFB);
+    const auto deadline = Clock::now() + std::chrono::milliseconds(500);
+    Clock::time_point healthy_since{};
+    while (Clock::now() < deadline) {
+      read_feedback_until(std::min(deadline, Clock::now() + std::chrono::milliseconds(5)));
+      const auto now = Clock::now();
+      std::lock_guard<std::mutex> lock(mutex_);
+      bool healthy = !state_.fault; // A new type-21 report remains latched.
+      for (int i = 0; i < kMotorCount; ++i) {
+        if (i == kArmDof && !has_gripper_) continue;
+        const auto& motor = motors_[i];
+        healthy &= now - motor.last_feedback <= kFeedbackLimit &&
+                   motor.rs_status_flags == 0 && motor.rs_run_state == 0;
+      }
+      if (!healthy) healthy_since = {};
+      else if (healthy_since == Clock::time_point{}) healthy_since = now;
+      else if (now - std::max(healthy_since, rs_unhealthy_at_) >= std::chrono::milliseconds(100)) {
+        rs_startup_recovery_ = false;
+        return;
+      }
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!state_.fault) {
+      state_.fault = true;
+      state_.fault_reason = "RS startup did not receive stable, fault-free disabled feedback";
+      for (int i = 0; i < kMotorCount; ++i) {
+        if (i == kArmDof && !has_gripper_) continue;
+        const auto& motor = motors_[i];
+        const auto prefix = "RS motor " + std::to_string(i + 1);
+        if (Clock::now() - motor.last_feedback > kFeedbackLimit) {
+          state_.fault_reason = prefix + " missing fresh feedback after fault clear";
+          break;
+        }
+        if (motor.rs_status_flags != 0) {
+          state_.fault_reason = prefix + " reported status flags " + std::to_string(motor.rs_status_flags) +
+                                " (" + rs_status_description(motor.rs_status_flags) + ")";
+          break;
+        }
+        if (motor.rs_run_state != 0) {
+          state_.fault_reason = prefix + " did not confirm disabled state after fault clear";
+          break;
+        }
+      }
+    }
+    throw std::runtime_error(state_.fault_reason + "; startup fault clear failed; motors remain disabled");
+  } catch (...) {
+    rs_startup_recovery_ = false;
+    throw;
   }
 }
 
@@ -695,17 +783,21 @@ void Robot::decode_frame(uint32_t id, const std::array<uint8_t, 8>& data) {
                               (static_cast<uint32_t>(data[3]) << 24);
       if (faults != 0) {
         for (int i = 0; i < kMotorCount; ++i)
-          if (node_id == motors_[i].send_id && host_id == motors_[i].feedback_id) {
+          if ((i < kArmDof || has_gripper_) &&
+              node_id == motors_[i].send_id && host_id == motors_[i].feedback_id) {
             std::lock_guard<std::mutex> lock(mutex_);
             state_.fault = true;
             state_.fault_reason = "RS motor " + std::to_string(i + 1) +
                                   " reported fault mask " + std::to_string(faults);
+            if (faults & 2u) state_.fault_reason += " (driver chip fault)";
             break;
           }
       }
       return;
     }
-    if (communication_type != kRsOperationStatus) return;
+    // Command replies use type 2; active telemetry on RS firmware uses type
+    // 24 with the same status flags and position/velocity/torque payload.
+    if (communication_type != kRsOperationStatus && communication_type != kRsActiveReport) return;
     const auto node_id = (id >> 8) & 0xFF;
     const auto host_id = id & 0xFF;
     for (int i = 0; i < kMotorCount; ++i)
@@ -735,10 +827,16 @@ void Robot::decode_frame(uint32_t id, const std::array<uint8_t, 8>& data) {
     }
   } else {
     const auto status_flags = (id >> 16) & 0x3F;
-    if (status_flags != 0) {
+    motors_[index].rs_status_flags = status_flags;
+    motors_[index].rs_run_state = (id >> 22) & 3;
+    if (status_flags != 0 || motors_[index].rs_run_state != 0) rs_unhealthy_at_ = now;
+    // During the one startup clear, delayed status flags may settle to zero.
+    // Runtime faults remain latched even if a later frame looks healthy.
+    if (status_flags != 0 && !rs_startup_recovery_) {
       state_.fault = true;
       state_.fault_reason = "RS motor " + std::to_string(index + 1) +
-                            " reported status flags " + std::to_string(status_flags);
+                            " reported status flags " + std::to_string(status_flags) +
+                            " (" + rs_status_description(status_flags) + ")";
     }
   }
   state_.q[index] = m.direction * decode(p, -m.pmax, m.pmax, 16);
