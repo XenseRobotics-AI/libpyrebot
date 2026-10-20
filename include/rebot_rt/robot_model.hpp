@@ -49,6 +49,7 @@ public:
   // 重力配置（写入 model.gravity，影响后续动力学）。
   void set_gravity(const Eigen::Vector3d& g);
   Eigen::Vector3d get_gravity() const;
+  Eigen::VectorXd gravity_torques(const Eigen::VectorXd& q) const;
 
   // FK：返回末端帧（或指定帧）的 (pos(3), rot(3x3), homogeneous(4x4))。
   std::tuple<Eigen::Vector3d, Eigen::Matrix3d, Eigen::Matrix4d>

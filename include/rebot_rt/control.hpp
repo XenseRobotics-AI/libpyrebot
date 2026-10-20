@@ -52,6 +52,9 @@ struct State {
   JointArray command{};      // position actually sent by the 100 Hz limiter
   JointArray command_velocity{};      // position-ramp slope, regardless of motor mode
   JointArray mit_command_velocity{};  // MIT dq field before direction/quantization; zero for pos_vel
+  JointArray gravity_torque{};        // unscaled model gravity at measured q, N m
+  JointArray mit_command_torque{};    // limited/slew-limited feedforward, before motor direction
+  std::array<bool, kMotorCount> gravity_torque_limited{};
   JointArray joint_speed_limits{};    // effective command limits, including a reset override
   JointArray joint_speed_utilization{}; // abs(command_velocity) / effective limit
   double joint_step_scale = 1.0;      // final coordinated joint-space limiter
@@ -115,6 +118,11 @@ public:
   uint64_t queue_target_pose(const Eigen::Matrix4d& pose, double gripper = 0.0);
   Eigen::Matrix4d forward_kinematics() const;
   Eigen::Matrix4d forward_kinematics(const JointArray& q) const;
+  // Configure before connect(); disabled by default. Limits apply to FF only, not total PD+FF torque.
+  void configure_gravity_compensation(double scale, const std::vector<double>& torque_limits_nm,
+                                      double slew_rate_nm_s = 5.0,
+                                      const Eigen::Vector3d& gravity = Eigen::Vector3d(0, 0, -9.81));
+  JointArray gravity_torques(const JointArray& q) const;
 
 private:
   struct Motor {
@@ -142,6 +150,9 @@ private:
   Family family_;
   std::string control_mode_;
   bool mit_velocity_feedforward_;
+  double gravity_compensation_scale_ = 0.0;
+  JointArray gravity_torque_limits_{};
+  double gravity_slew_rate_ = 5.0;
   std::string channel_;
   std::string end_frame_;
   bool has_gripper_;

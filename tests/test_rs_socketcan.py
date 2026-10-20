@@ -323,7 +323,7 @@ finally:
 
     def run_native(self, fail_setting=None, tx_failure=None, script=None,
                    fault_case=None, control_mode="pos_vel", active_report_type=2, reply_status=True,
-                   initial_q=None, feedforward=True):
+                   initial_q=None, feedforward=True, torque_frames=None):
         path = str(Path(self.temp.name) / "bus")
         if os.path.exists(path):
             os.unlink(path)
@@ -389,6 +389,8 @@ finally:
                             arb, _, data = FRAME.unpack(packet)
                             kind, motor = (arb >> 24) & 0x1F, arb & 0xFF
                             frames.append((kind, motor, data))
+                            if kind == 1 and torque_frames is not None:
+                                torque_frames.append((motor, (arb >> 8) & 0xFFFF))
                             if kind == 3:
                                 enabled.add(motor)
                                 if len(enabled) == 6:
@@ -470,6 +472,96 @@ finally:
         self.assertFalse(thread.is_alive())
         self.assertFalse(errors, f"{errors}\n{result.stdout}\n{result.stderr}")
         return result, frames, registers
+
+    def test_gravity_feedforward_encoding_limits_slew_and_watchdog_hold(self):
+        for direction, scale in ((1, 0), (1, 0.5), (-1, 0.5)):
+            with self.subTest(direction=direction, scale=scale):
+                torques = []
+                script = '''
+import time
+from pathlib import Path
+import numpy as np
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+configs = rebot_rt.default_motor_configs(rebot_rt.Family.RS)
+configs[2].direction = DIRECTION
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False,
+                       motor_configs=configs, mit_velocity_feedforward=False, command_timeout_sec=0.1)
+scale = SCALE
+if scale:
+    robot.configure_gravity_compensation(scale, [1, 8, 1, 3, 1, 1], slew_rate_nm_s=5)
+try:
+    robot.connect()
+    try:
+        robot.configure_gravity_compensation(1, [1] * 6)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("live reconfiguration was accepted")
+    robot.start()
+    q = np.array(robot.get_state().q)
+    robot.set_target_joints(q + [0, 0, 0.2, 0, 0, 0, 0])
+    time.sleep(0.5)  # The fake encoders stay fixed; the command moves then times out.
+    state = robot.get_state()
+    assert not state.fault, state.fault_reason
+    assert state.command[2] > state.q[2] + 0.01
+    np.testing.assert_allclose(state.command_velocity, 0)
+    np.testing.assert_allclose(state.mit_command_velocity, 0)
+    raw = robot.gravity_torques(q) if scale else np.zeros(7)
+    np.testing.assert_allclose(state.gravity_torque, raw)
+    np.testing.assert_allclose(state.mit_command_torque, np.clip(scale * np.array(raw), -np.array([1,8,1,3,1,1,0]), [1,8,1,3,1,1,0]), atol=1e-6)
+    assert state.gravity_torque_limited[2] == bool(scale)
+    robot.hold_position()
+    time.sleep(0.03)
+    np.testing.assert_allclose(robot.get_state().mit_command_torque, state.mit_command_torque)
+    robot.stop()
+    robot.start()
+    time.sleep(0.015)
+    assert abs(robot.get_state().mit_command_torque[2]) < 0.3  # Restart resets the ramp.
+finally:
+    robot.close()
+'''.replace("DIRECTION", str(direction)).replace("SCALE", str(scale))
+                result, frames, _ = self.run_native(
+                    script=script, control_mode="mit", torque_frames=torques,
+                    initial_q=[0, 0.8, 0.8 * direction, -0.5, 0, 0])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                first_stop = next(i for i, (kind, _, data) in enumerate(frames)
+                                  if i > next(j for j, (k, _, _) in enumerate(frames) if k == 3)
+                                  and kind == 4 and data[0] == 0)
+                n = sum(kind == 1 for kind, _, _ in frames[:first_stop])
+                j3 = [-36 + value * 72 / 65535 for mid, value in torques[:n] if mid == 3]
+                self.assertGreater(len(j3), 10)
+                self.assertLessEqual(abs(j3[0]), 0.052)
+                self.assertTrue(all(abs(b - a) <= 0.052 for a, b in zip(j3, j3[1:])))
+                self.assertAlmostEqual(j3[-1], direction if scale else 0, delta=0.002)
+                for kind, mid, data in frames:
+                    if kind == 1 and mid == 3:
+                        self.assertAlmostEqual(int.from_bytes(data[4:6], "big") * 5000 / 65535, 150, delta=0.08)
+                        self.assertAlmostEqual(int.from_bytes(data[6:8], "big") * 100 / 65535, 10, delta=0.002)
+
+    def test_gravity_compensation_preserves_fault_and_stale_feedback_shutdown(self):
+        for fault in ("runtime", "silent_runtime"):
+            with self.subTest(fault=fault):
+                result, frames, _ = self.run_native(control_mode="mit", fault_case=fault, script='''
+import time
+from pathlib import Path
+import rebot_rt
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False)
+robot.configure_gravity_compensation(0.5, [1, 8, 8, 3, 1, 1])
+try:
+    robot.connect()
+    robot.start()
+    time.sleep(0.25)
+    state = robot.get_state()
+    assert state.fault and not state.running, state.fault_reason
+    assert "overcurrent" in state.fault_reason or "stale feedback" in state.fault_reason
+finally:
+    robot.close()
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(sum(kind == 3 for kind, _, _ in frames), 6)
+                self.assertTrue(all(kind == 4 for kind, _, _ in frames[-6:]))
 
     def run_feedback_pause(self, mode, silent=False):
         # Only the child controller is paused; the parent fake motor keeps

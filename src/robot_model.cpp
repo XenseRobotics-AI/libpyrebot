@@ -7,6 +7,7 @@
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/model.hpp>
+#include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/spatial/explog.hpp>
 
 #include <cmath>
@@ -104,6 +105,12 @@ Eigen::VectorXd RobotModel::neutral() const { return pinocchio::neutral(model_);
 
 void RobotModel::set_gravity(const Eigen::Vector3d& g) { model_.gravity.linear(g); }
 Eigen::Vector3d RobotModel::get_gravity() const { return model_.gravity.linear(); }
+
+Eigen::VectorXd RobotModel::gravity_torques(const Eigen::VectorXd& q) const {
+  if (q.size() != model_.nq || !q.allFinite())
+    throw std::invalid_argument("gravity configuration must be finite and match model.nq");
+  return pinocchio::computeGeneralizedGravity(model_, data_, q);
+}
 
 Eigen::VectorXd RobotModel::random_configuration() const {
   // 与 inverse_kinematics.py 的随机重试一致：limit 无穷时退化为 [-pi, pi]。

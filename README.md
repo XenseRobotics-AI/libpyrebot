@@ -9,6 +9,17 @@ Native C++ controller for a six joint reBot B601 arm plus its optional motor gri
 
 The default motor IDs are 1–7. DM feedback IDs are `0x11`–`0x17`; the RS host ID is `0xFD`. The bundled URDF coordinates are the raw zeroed motor coordinates, so the default `direction` is `1` for both families. Check the joint signs on your hardware before moving; the older LeRobot joint follower uses a different RS display convention.
 
+For DM, an absolute device path in `channel` (including `/dev/serial/by-id/...`) selects the
+Damiao serial bridge; an interface name such as `can0` selects SocketCAN. This corresponds to
+the older follower's `can_adapter="damiao"` plus `port`, but the RT API needs no `can_adapter`.
+`dm_serial_baud` applies only to the serial bridge. Dual arms need separate devices; `/dev/ttyACM0`
+and `/dev/ttyACM1` are examples, not automatic left/right assignments.
+
+DM J1–J3 default to MIT `Kp=45`, `Kd=5`. The older follower requested `Kd=12`, but
+[MotorBridge v0.5.1's DM encoder](https://github.com/motorbridge/motorbridge/blob/v0.5.1/motor_vendors/damiao/src/protocol.rs)
+clamps Kd to `[0, 5]`, so its transmitted damping was also 5. Do not raise `kdmax` just to
+accept 12: it changes packet scaling, not the motor firmware's decoding range.
+
 ## Build
 
 Build with the Python interpreter that will import the module. Pinocchio and pybind11 must be available in that environment; CMake also needs Eigen and the Pinocchio C++ libraries.
@@ -40,21 +51,17 @@ config = RebotB601RTConfig(
 )
 ```
 
-For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, the existing LeRobot adapter automatically selects `assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf`. For a DM arm with the same C1-mounted TacCap, explicitly set `urdf_path` to `assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf` as below. Both TacCap models use `taccap_eef_link`, but retain their own arm geometry, joint directions, and limits. See the [DM TacCap model notes](rebot_rt/assets/DM_Taccap/README.md) for mounting and the self-contained mesh layout. Motor communication still follows `motor_family`.
+For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, the updated `lerobot-xense` adapter selects `assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf` for DM or `assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf` for RS. Both use `taccap_eef_link` automatically, so YAML recipes can omit `urdf_path` and `end_frame`. The models retain their own arm geometry, joint directions, and limits. See the [DM TacCap model notes](rebot_rt/assets/DM_Taccap/README.md) for mounting and the self-contained mesh layout. Direct native `rebot_rt.Robot` calls still require a URDF path; automatic selection belongs to the LeRobot adapter.
 
 LeRobot defaults to `control_mode="pos_vel"`, following the position/velocity loop used by `rebotarm_control_rt`'s `ArmEndPos`. The six arm motors use the reference package's DM/RS position and velocity gains; the native CAN gripper retains MIT mode and its separate gains. DM uses POS_VEL mode 2 and CAN ID `0x100 + motor_id`. RS uses streaming CSP mode 5 with `limit_spd`/`loc_ref` (`0x7017`/`0x7016`), as specified in the [RobStride protocol](https://github.com/RobStride/Python_Sample/blob/main/robstride_dynamics/protocol.py). The reference wrapper selected PP mode 1 while writing CSP speed parameters; this controller pairs the streaming mode and speed parameter explicitly. The native cycle remains 100 Hz and the speed limit remains 0.5 rad/s by default, rather than copying the reference's 500 Hz and higher speed limits. Set `control_mode="mit"` to use MIT instead. Direct `rebot_rt.Robot` calls retain their original default of `"mit"`; pass `control_mode="pos_vel"` explicitly when using that API.
 
 ```python
-from pathlib import Path
-import rebot_rt
 from lerobot.grippers import TaccapFollowerConfig
 
 config = RebotB601RTConfig(
-    motor_family="dm",  # or "rs"
-    channel="can0",
-    urdf_path=str(Path(rebot_rt.__file__).parent / "assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf"),
-    end_frame="taccap_eef_link",
-    has_gripper=False,
+    motor_family="dm",
+    channel="/dev/ttyACM0",  # actual DM bridge; RS uses a SocketCAN name such as can0
+    dm_serial_baud=921600,
     gripper=TaccapFollowerConfig(side="left"),
 )
 ```
@@ -96,6 +103,66 @@ config.motor_configs = [
 
 For direct pybind use, call `rebot_rt.default_motor_configs(family)` and then edit each `MotorConfig` before constructing `Robot`. Use `config.set_model(family, model_name)` to update the model's protocol ranges together.
 
+## MIT gravity feedforward
+
+Gravity compensation is opt-in and leaves Kp, Kd, position interpolation, and fault handling unchanged.
+The native worker evaluates Pinocchio's `computeGeneralizedGravity` at the **measured** six joint
+angles every 10 ms. The torque sent in the MIT feedforward field is the scaled model torque,
+clipped per joint and slew-limited from zero at each `start()`. Motor `direction` applies to
+torque as well as position/velocity. The seventh CAN gripper receives no gravity feedforward.
+
+Configure before `connect()`:
+
+```python
+robot.configure_gravity_compensation(
+    scale=0.5,                         # [0, 1]; 0 disables compensation
+    torque_limits_nm=[1, 8, 8, 3, 1, 1],  # example RS TacCap FF caps, J1..J6
+    slew_rate_nm_s=5.0,
+    gravity=[0, 0, -9.81],            # m/s^2 in the URDF root frame
+)
+# Offline model query: no connection required, returns seven values (last is zero).
+gravity_nm = robot.gravity_torques([0, 0.8, 0.8, -0.5, 0, 0, 0])
+```
+
+LeRobot exposes `gravity_compensation_scale` (default `0.0`), `gravity_torque_limits_nm`
+(six explicit nonnegative values required when enabled), `gravity_slew_rate_nm_s` (default `5.0`),
+and `gravity_vector` (default `[0, 0, -9.81]`). Set them under the single arm or each dual-arm config.
+Nonzero compensation requires `control_mode: mit`. A zero joint cap disables that joint's FF.
+The RS TacCap dual-arm recipes start at `0.5` for initial hardware comparison; increase toward
+`1.0` only after checking direction and static tracking at multiple poses. Keep speed low for
+that check. Scale and caps limit the **feedforward term**, not the total motor PD+FF torque,
+and do not establish a safe contact force or a continuous thermal rating.
+
+For upright, level-mounted bases, the bundled RS TacCap model already includes the adapter and
+TacCap (about 0.692 kg); do not add that mass again. Fingers are fixed at their neutral pose in
+the reduced model. Additional tools, grasped objects, a different mount, and model inaccuracies
+require corresponding model/gravity-vector validation. This implementation does not compensate
+friction, acceleration, or contact forces, and does not automatically load identified torque biases.
+
+Startup, A-button reset, exit return, and command-watchdog hold all retain compensation.
+Stale feedback, transport errors, and reported motor faults still stop and disable the motors;
+there is no automatic fault clearing during motion. Gravity compensation cannot prevent all
+contact-induced trips. `State.gravity_torque` reports the unscaled model estimate,
+`State.mit_command_torque` the applied FF before motor direction/quantization, and
+`State.gravity_torque_limited` flags amplitude clipping (not slew limiting).
+LeRobot's `trace_joint_tracking` includes these values when compensation is enabled.
+Observed positions remain encoder-derived.
+
+Rebuild the checkout used by the interpreter after updating the library. With the independent
+checkout on this workstation:
+
+```bash
+cmake -S /home/xense/rebot_lerobot/libpyrebot -B /tmp/libpyrebot-gravity-build \
+  -DPython3_EXECUTABLE=/home/xense/miniforge3/envs/lerobot-xense/bin/python \
+  -DPINOCCHIO_PREFIX=/home/xense/miniforge3/envs/rebot
+cmake --build /tmp/libpyrebot-gravity-build -j2
+PYTHONPATH=/home/xense/rebot_lerobot/libpyrebot python -c \
+  'import rebot_rt; print(rebot_rt.__file__); print(hasattr(rebot_rt.Robot, "configure_gravity_compensation"))'
+```
+
+An older `third_party/libpyrebot` entry at the front of `PYTHONPATH` overrides an editable install.
+The B601 adapter rejects enabled compensation on an older build before opening the hardware.
+
 ## Startup and stop
 
 1. Calibrate motor zero positions with the vendor tool and check the arm is supported mechanically. This package does not write motor zero offsets.
@@ -113,6 +180,12 @@ RS feedback accepts both type-2 command replies and type-24 active reports. Both
 Runtime faults remain latched even when later feedback looks healthy; there is no automatic clear or re-enable during control. After removing the external load or obstruction, restart the application to attempt the bounded startup clear. If that fails, inspect the indicated motor and its power/driver before retrying. The two RS fault encodings differ: type-2 `status flags 2` means three-phase overcurrent, while type-21 `fault mask 2` means driver chip fault, per the [vendor protocol](https://github.com/RobStride/EDULITE_A3/blob/main/el_a3_sdk/docs/%E7%94%B5%E6%9C%BA%E9%80%9A%E4%BF%A1%E5%8D%8F%E8%AE%AE%E6%B1%87%E6%80%BB.md). Neither code alone establishes the physical cause.
 
 SocketCAN sends retry temporary `ENOBUFS`, `EAGAIN`, and interrupted writes with a 1 ms backoff, for at most 20 ms per frame. This handles brief bursts exceeding a small device TX queue without dropping commands. A persistent full queue still raises an error naming the interface; permanent interface errors fail immediately. RS CSP sends only one position frame per arm joint per cycle, since its fixed speed limit and active-report configuration are established before enabling. The driver does not change the system's CAN queue length.
+
+DM serial sends retain partial-packet progress and retry temporary backpressure and interruptions
+within one 20 ms deadline per packet. Persistent blockage, a zero-length write, or a disconnect
+raises a transport error and follows the existing fault/disable path, rather than waiting forever
+during control or shutdown. A failed transport may prevent disable packets from reaching motors.
+DM feedback requests encode both bytes of the configured motor ID, including IDs above `0xFF`.
 
 LeRobot enables `interpolate_cartesian_targets: true` in both `pos_vel` and `mit`. Its pose calls use `queue_target_pose()` to submit the latest waypoint without running IK on the Python producer thread. Following the `libtron2rt` Cartesian flow, the native worker measures the interval between producer calls, interpolates translation linearly and rotation by shortest-path quaternion SLERP, and solves each 100 Hz sample starting from the last limited joint command. A 30 Hz producer normally gets 3–4 native samples per waypoint; a 60 Hz producer gets 1–2. Each replacement segment begins at FK of the last limited command, so an unsent remote IK goal is not used as its start. The first waypoint and a restart after the watchdog use one 10 ms period. This is time-based interpolation, not acceleration- or jerk-limited motion.
 

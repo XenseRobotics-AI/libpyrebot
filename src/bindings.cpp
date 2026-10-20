@@ -39,6 +39,9 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("command", &State::command)
       .def_readonly("command_velocity", &State::command_velocity)
       .def_readonly("mit_command_velocity", &State::mit_command_velocity)
+      .def_readonly("gravity_torque", &State::gravity_torque)
+      .def_readonly("mit_command_torque", &State::mit_command_torque)
+      .def_readonly("gravity_torque_limited", &State::gravity_torque_limited)
       .def_readonly("joint_speed_limits", &State::joint_speed_limits)
       .def_readonly("joint_speed_utilization", &State::joint_speed_utilization)
       .def_readonly("joint_step_scale", &State::joint_step_scale)
@@ -92,6 +95,10 @@ PYBIND11_MODULE(_native, m) {
       .def("set_target_joints", &Robot::set_target_joints, py::arg("q"),
            py::arg("max_joint_speed") = py::none())
       .def("hold_position", &Robot::hold_position)
+      .def("configure_gravity_compensation", &Robot::configure_gravity_compensation,
+           py::arg("scale"), py::arg("torque_limits_nm"), py::arg("slew_rate_nm_s") = 5.0,
+           py::arg("gravity") = Eigen::Vector3d(0, 0, -9.81))
+      .def("gravity_torques", &Robot::gravity_torques, py::arg("q"))
       .def("set_target_pose", &Robot::set_target_pose, py::arg("pose"),
            py::arg("gripper") = 0.0, py::call_guard<py::gil_scoped_release>())
       .def("queue_target_pose", &Robot::queue_target_pose, py::arg("pose"), py::arg("gripper") = 0.0)
