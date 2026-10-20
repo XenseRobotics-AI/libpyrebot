@@ -40,16 +40,21 @@ config = RebotB601RTConfig(
 )
 ```
 
-For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, **either motor family** uses the bundled `assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf` and its `taccap_eef_link` frame for both FK and IK. These are the same model assets as the standalone `libpyrebot/rebot_rt/assets` directory, including meshes and the TacCap offset YAML. Motor communication still follows `motor_family`.
+For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, the existing LeRobot adapter automatically selects `assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf`. For a DM arm with the same C1-mounted TacCap, explicitly set `urdf_path` to `assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf` as below. Both TacCap models use `taccap_eef_link`, but retain their own arm geometry, joint directions, and limits. See the [DM TacCap model notes](rebot_rt/assets/DM_Taccap/README.md) for mounting and the self-contained mesh layout. Motor communication still follows `motor_family`.
 
 LeRobot defaults to `control_mode="pos_vel"`, following the position/velocity loop used by `rebotarm_control_rt`'s `ArmEndPos`. The six arm motors use the reference package's DM/RS position and velocity gains; the native CAN gripper retains MIT mode and its separate gains. DM uses POS_VEL mode 2 and CAN ID `0x100 + motor_id`. RS uses streaming CSP mode 5 with `limit_spd`/`loc_ref` (`0x7017`/`0x7016`), as specified in the [RobStride protocol](https://github.com/RobStride/Python_Sample/blob/main/robstride_dynamics/protocol.py). The reference wrapper selected PP mode 1 while writing CSP speed parameters; this controller pairs the streaming mode and speed parameter explicitly. The native cycle remains 100 Hz and the speed limit remains 0.5 rad/s by default, rather than copying the reference's 500 Hz and higher speed limits. Set `control_mode="mit"` to use MIT instead. Direct `rebot_rt.Robot` calls retain their original default of `"mit"`; pass `control_mode="pos_vel"` explicitly when using that API.
 
 ```python
+from pathlib import Path
+import rebot_rt
 from lerobot.grippers import TaccapFollowerConfig
 
 config = RebotB601RTConfig(
     motor_family="dm",  # or "rs"
     channel="can0",
+    urdf_path=str(Path(rebot_rt.__file__).parent / "assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf"),
+    end_frame="taccap_eef_link",
+    has_gripper=False,
     gripper=TaccapFollowerConfig(side="left"),
 )
 ```

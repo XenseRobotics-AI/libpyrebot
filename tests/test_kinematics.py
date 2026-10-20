@@ -1,4 +1,4 @@
-"""Offline checks for both bundled arm models and native IK."""
+"""Offline checks for bundled arm/gripper models and native IK."""
 
 import unittest
 from pathlib import Path
@@ -15,12 +15,13 @@ class TestKinematics(unittest.TestCase):
         names = {
             "DM": "ReBot_Arm_DM.urdf",
             "RS": "ReBot_Arm_RS.urdf",
+            "DM_Taccap": "rebot_b601_dm_taccap.urdf",
             "RS_Taccap": "rebot_b601_rs_taccap_v2_gripper.urdf",
         }
         return assets / model / "urdf" / names[model]
 
     def test_bundled_urdfs_have_all_meshes(self):
-        for model in ("DM", "RS", "RS_Taccap"):
+        for model in ("DM", "RS", "DM_Taccap", "RS_Taccap"):
             with self.subTest(model=model):
                 urdf = self.bundled_urdf(model)
                 self.assertTrue(urdf.is_file(), urdf)
@@ -90,6 +91,45 @@ class TestKinematics(unittest.TestCase):
                 result = implicit.set_target_pose(target)
                 self.assertTrue(result.success)
                 self.assertLess(np.linalg.norm(implicit.forward_kinematics(result.target) - target), 2e-4)
+
+    def test_dm_taccap_preserves_dm_arm_and_c1_tool_transform(self):
+        original = rebot_rt.Robot(
+            rebot_rt.Family.DM, "unused", str(self.bundled_urdf("DM")),
+            end_frame="link6", has_gripper=False,
+        )
+        urdf = str(self.bundled_urdf("DM_Taccap"))
+        wrist = rebot_rt.Robot(
+            rebot_rt.Family.DM, "unused", urdf, end_frame="link6", has_gripper=False,
+        )
+        tool = rebot_rt.Robot(rebot_rt.Family.DM, "unused", urdf, has_gripper=False)
+        explicit = rebot_rt.Robot(
+            rebot_rt.Family.DM, "unused", urdf, end_frame="taccap_eef_link", has_gripper=False,
+        )
+        # C1 direct-output mounting: 180 degrees about Z, with the TCP
+        # 36.575 mm along -X and 214.9217 mm along +Z of the DM wrist.
+        wrist_to_tool = np.diag([-1.0, -1.0, 1.0, 1.0])
+        wrist_to_tool[:3, 3] = [-0.036575, 0.0, 0.2149217]
+        poses = ([0.0] * 7, [0.15, -0.6, -0.5, -0.25, 0.2, 0.1, 0.0],
+                 [-0.4, -1.2, -0.8, 0.4, -0.3, -0.2, 0.0])
+        for q in poses:
+            with self.subTest(q=q):
+                dm_wrist = original.forward_kinematics(q)
+                np.testing.assert_allclose(wrist.forward_kinematics(q), dm_wrist, atol=1e-12)
+                np.testing.assert_allclose(tool.forward_kinematics(q), dm_wrist @ wrist_to_tool, atol=1e-12)
+                np.testing.assert_allclose(tool.forward_kinematics(q), explicit.forward_kinematics(q), atol=1e-12)
+        # Exercise nontrivial IK with DM's negative J2/J3 coordinates.
+        seed = np.array(poses[1])
+        tool.set_target_joints(seed)
+        goal = seed + [0.02, -0.03, -0.02, 0.01, 0.02, -0.01, 0.0]
+        target = tool.forward_kinematics(goal)
+        result = tool.set_target_pose(target)
+        self.assertTrue(result.success, result.error)
+        np.testing.assert_allclose(tool.forward_kinematics(result.target), target, atol=2e-4)
+        for joint in (1, 2):
+            invalid = seed.copy()
+            invalid[joint] = 0.1
+            with self.subTest(joint=joint), self.assertRaises(ValueError):
+                tool.set_target_joints(invalid)
 
     def test_per_joint_limits_validation_and_scalar_override(self):
         urdf = str(self.bundled_urdf("RS_Taccap"))
