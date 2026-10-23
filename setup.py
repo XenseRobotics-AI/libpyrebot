@@ -20,9 +20,12 @@ setup(
     package_data={
         "rebot_rt": [
             f"_native{suffix}",
-            "assets/*/README.md",
-            "assets/*/urdf/*",
-            "assets/*/meshes/*/*",
+            # Include each model's URDF, offset, meshes and source/license metadata.
+            *[
+                str(p.relative_to(Path(__file__).parent / "rebot_rt"))
+                for p in (Path(__file__).parent / "rebot_rt/assets").rglob("*")
+                if p.is_file()
+            ],
         ]
     },
 )

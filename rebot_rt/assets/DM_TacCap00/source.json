@@ -1,0 +1,16 @@
+{
+  "source_export": "rebot_b601_dm_taccap_v1_gripper",
+  "source_urdf_sha256": "a5f345c7d8b71739d1a73eea2c6955b2c02ef94d471e8b05c198d8ec2963bece",
+  "source_offset_sha256": "d031fc74f2611539a89a1d0a173e44ed99d6c2b32660ef59095d22c5643c1213",
+  "gripper_model": "TacCap00",
+  "payload_mass_kg": 0.9839121914407402,
+  "gravity_m_s2": [
+    0,
+    0,
+    -9.80665
+  ],
+  "mesh_note": "TacCap00 and TacCap05 currently use identical gripper meshes; inertials are model-specific.",
+  "urdf_changes": [
+    "Relative gripper mesh directory renamed from taccap_description to taccap00. No kinematic or inertial changes."
+  ]
+}

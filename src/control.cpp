@@ -668,7 +668,8 @@ Eigen::Matrix4d Robot::forward_kinematics(const JointArray& q) const {
 }
 
 void Robot::configure_gravity_compensation(double scale, const std::vector<double>& torque_limits_nm,
-                                          double slew_rate_nm_s, const Eigen::Vector3d& gravity) {
+                                          double slew_rate_nm_s, const Eigen::Vector3d& gravity,
+                                          const std::vector<double>& torque_offsets_nm) {
   if (connected() || running())
     throw std::runtime_error("configure gravity compensation before connect()");
   if (!std::isfinite(scale) || scale < 0 || scale > 1)
@@ -677,9 +678,13 @@ void Robot::configure_gravity_compensation(double scale, const std::vector<doubl
     throw std::invalid_argument("gravity compensation requires MIT mode");
   if (torque_limits_nm.size() != kArmDof)
     throw std::invalid_argument("gravity torque limits must contain six values in N m");
+  if (!torque_offsets_nm.empty() && torque_offsets_nm.size() != kArmDof)
+    throw std::invalid_argument("gravity torque offsets must contain six values in N m");
   if (!std::isfinite(slew_rate_nm_s) || slew_rate_nm_s <= 0 || !gravity.allFinite())
     throw std::invalid_argument("gravity and positive torque slew rate must be finite");
   for (int i = 0; i < kArmDof; ++i) {
+    if (!torque_offsets_nm.empty() && !std::isfinite(torque_offsets_nm[i]))
+      throw std::invalid_argument("gravity torque offsets must be finite");
     if (!std::isfinite(torque_limits_nm[i]) || torque_limits_nm[i] < 0 ||
         torque_limits_nm[i] > std::min(motors_[i].tmax, model_.model().effortLimit[i]))
       throw std::invalid_argument("gravity torque limit outside motor/URDF range at joint " +
@@ -689,6 +694,8 @@ void Robot::configure_gravity_compensation(double scale, const std::vector<doubl
   gravity_compensation_scale_ = scale;
   gravity_slew_rate_ = slew_rate_nm_s;
   std::copy(torque_limits_nm.begin(), torque_limits_nm.end(), gravity_torque_limits_.begin());
+  gravity_torque_offsets_.fill(0.0);
+  std::copy(torque_offsets_nm.begin(), torque_offsets_nm.end(), gravity_torque_offsets_.begin());
   model_.set_gravity(gravity);
 }
 
@@ -921,6 +928,32 @@ void Robot::write_setting(int index, uint16_t setting, uint32_t value) {
 }
 
 void Robot::configure_motor(int index) {
+  const auto& m = motors_[index];
+  if (family_ == Family::DM) {
+    // The MIT command and feedback share the motor's configured float ranges.
+    // Match the identification driver: a model name alone cannot establish
+    // these ranges, and a mismatch silently rescales torque/position/velocity.
+    const std::array<uint16_t, 3> settings{21, 22, 23};
+    const std::array<const char*, 3> names{"PMAX", "VMAX", "TMAX"};
+    const std::array<double, 3> expected{m.pmax, m.vmax, m.tmax};
+    for (int j = 0; j < 3; ++j) {
+      uint32_t bits = 0;
+      for (int attempt = 0; ; ++attempt) {
+        try { bits = read_setting(index, settings[j]); break; }
+        catch (const std::runtime_error&) { if (attempt == 2) throw; }
+      }
+      float actual;
+      std::memcpy(&actual, &bits, sizeof(actual));
+      if (!std::isfinite(actual) || actual <= 0 ||
+          std::abs(actual - expected[j]) > 1e-4 + 1e-4 * std::abs(expected[j])) {
+        std::ostringstream message;
+        message << "DM motor " << index + 1 << " " << names[j]
+                << " mismatch: motor=" << actual << ", configured=" << expected[j]
+                << "; verify motor model and protocol ranges before enabling";
+        throw std::runtime_error(message.str());
+      }
+    }
+  }
   // RS streaming uses CSP (5): limit_spd belongs to CSP, whereas PP (1)
   // uses vel_max/acc_set and replans each goal. DM uses POS_VEL (2).
   const uint16_t mode_setting = family_ == Family::RS ? 0x7005 : 10;
@@ -937,7 +970,6 @@ void Robot::configure_motor(int index) {
   }
   if (!confirmed) throw std::runtime_error("motor " + std::to_string(index + 1) + " control mode readback mismatch");
   if (!position_mode(index)) return;
-  const auto& m = motors_[index];
   const std::array<uint16_t, 4> settings = family_ == Family::RS
       ? std::array<uint16_t, 4>{0x701F, 0x7020, 0x701E, 0}
       : std::array<uint16_t, 4>{25, 26, 27, 28};
@@ -1280,7 +1312,7 @@ void Robot::run() noexcept {
         state_.mit_command_velocity = mit_velocity;
         state_.gravity_torque = gravity;
         for (int i = 0; i < kArmDof && gravity_compensation_scale_ > 0; ++i) {
-          const double requested = gravity_compensation_scale_ * gravity[i];
+          const double requested = gravity_compensation_scale_ * (gravity[i] + gravity_torque_offsets_[i]);
           const double limited = std::clamp(requested, -gravity_torque_limits_[i], gravity_torque_limits_[i]);
           const double step = gravity_slew_rate_ * 0.01;
           mit_torque[i] = state_.mit_command_torque[i] +

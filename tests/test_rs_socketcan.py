@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 import numpy as np
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
                        has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"],
                        mit_velocity_feedforward=os.environ.get("REBOT_TEST_MIT_FF", "1") == "1",
@@ -446,7 +446,7 @@ import os
 from pathlib import Path
 import numpy as np
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
                        has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"],
                        command_timeout_sec=0.04)
@@ -482,7 +482,7 @@ import time
 from pathlib import Path
 import numpy as np
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 configs = rebot_rt.default_motor_configs(rebot_rt.Family.RS)
 configs[2].direction = DIRECTION
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False,
@@ -546,7 +546,7 @@ finally:
 import time
 from pathlib import Path
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False)
 robot.configure_gravity_compensation(0.5, [1, 8, 8, 3, 1, 1])
 try:
@@ -571,7 +571,7 @@ finally:
 import os, signal, subprocess, sys, time
 from pathlib import Path
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False,
                        control_mode=os.environ["REBOT_TEST_CONTROL_MODE"], mit_velocity_feedforward=False)
 try:
@@ -617,7 +617,7 @@ finally:
 import time
 from pathlib import Path
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf), has_gripper=False)
 try:
     robot.connect()
@@ -660,7 +660,7 @@ import time
 from pathlib import Path
 import numpy as np
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
                        has_gripper=False, control_mode="pos_vel", max_joint_speed=1.5)
 def wait_for(check):
@@ -810,7 +810,7 @@ import os
 import time
 from pathlib import Path
 import rebot_rt
-urdf = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+urdf = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 robot = rebot_rt.Robot(rebot_rt.Family.RS, "_rebot_test_can", str(urdf),
                        has_gripper=False, control_mode=os.environ["REBOT_TEST_CONTROL_MODE"])
 try:

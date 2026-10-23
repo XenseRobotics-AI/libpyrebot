@@ -7,7 +7,7 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import rebot_rt
 
-URDF = Path(rebot_rt.__file__).parent / "assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
+URDF = Path(rebot_rt.__file__).parent / "assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf"
 LIMITS = [1, 8, 8, 3, 1, 1]
 
 
@@ -19,8 +19,8 @@ def rotation(axis, angle):
     return np.eye(3) + np.sin(angle) * skew + (1 - np.cos(angle)) * skew @ skew
 
 
-def potential_energy(q, gravity):
-    root = ET.parse(URDF).getroot()
+def potential_energy(q, gravity, urdf=URDF):
+    root = ET.parse(urdf).getroot()
     links = {link.attrib["name"]: link for link in root.findall("link")}
     children = {}
     for joint in root.findall("joint"):
@@ -51,6 +51,21 @@ def potential_energy(q, gravity):
 
 
 class TestGravity(unittest.TestCase):
+    def test_dm_identified_model_gravity_matches_energy_including_payload(self):
+        urdf = Path(rebot_rt.__file__).parent / "assets/DM_TacCap00/urdf/rebot_b601_dm_taccap_v1_gripper.urdf"
+        robot = rebot_rt.Robot(rebot_rt.Family.DM, "unused", str(urdf), has_gripper=False)
+        gravity = [0, 0, -9.80665]
+        robot.configure_gravity_compensation(1, [1, 22, 12, 4, 2, 1], gravity=gravity,
+                                             torque_offsets_nm=[0.08, 0.02, -0.06, 0.058, -0.008, -0.011])
+        for q in ([0] * 7, [0, -0.8, -0.8, 0.5, 0, 0, 0], [0.4, -1.2, -0.4, -0.3, 0.5, 0.9, 0]):
+            expected = []
+            for delta in np.eye(7)[:6] * 1e-6:
+                expected.append((potential_energy(q + delta, gravity, urdf) -
+                                 potential_energy(q - delta, gravity, urdf)) / 2e-6)
+            # gravity_torques stays the pure URDF prediction; offsets apply only to sent FF.
+            np.testing.assert_allclose(robot.gravity_torques(q), [*expected, 0], atol=1e-6)
+        self.assertFalse(robot.connected)
+
     def robot(self, **kwargs):
         return rebot_rt.Robot(rebot_rt.Family.RS, "unused", str(URDF), has_gripper=False, **kwargs)
 
@@ -77,6 +92,9 @@ class TestGravity(unittest.TestCase):
         for rate in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 robot.configure_gravity_compensation(1, LIMITS, slew_rate_nm_s=rate)
+        for offsets in ([0] * 5, [0] * 7, [float("nan")] * 6, [float("inf")] * 6):
+            with self.assertRaisesRegex(ValueError, "offsets"):
+                robot.configure_gravity_compensation(1, LIMITS, torque_offsets_nm=offsets)
         with self.assertRaises(ValueError):
             robot.configure_gravity_compensation(1, LIMITS, gravity=[float("nan"), 0, 0])
         with self.assertRaises(ValueError):

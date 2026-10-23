@@ -121,7 +121,8 @@ public:
   // Configure before connect(); disabled by default. Limits apply to FF only, not total PD+FF torque.
   void configure_gravity_compensation(double scale, const std::vector<double>& torque_limits_nm,
                                       double slew_rate_nm_s = 5.0,
-                                      const Eigen::Vector3d& gravity = Eigen::Vector3d(0, 0, -9.81));
+                                      const Eigen::Vector3d& gravity = Eigen::Vector3d(0, 0, -9.81),
+                                      const std::vector<double>& torque_offsets_nm = {});
   JointArray gravity_torques(const JointArray& q) const;
 
 private:
@@ -152,6 +153,7 @@ private:
   bool mit_velocity_feedforward_;
   double gravity_compensation_scale_ = 0.0;
   JointArray gravity_torque_limits_{};
+  JointArray gravity_torque_offsets_{};  // identified holding bias in public joint coordinates
   double gravity_slew_rate_ = 5.0;
   std::string channel_;
   std::string end_frame_;

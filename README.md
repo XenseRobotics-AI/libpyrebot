@@ -51,7 +51,7 @@ config = RebotB601RTConfig(
 )
 ```
 
-For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, the updated `lerobot-xense` adapter selects `assets/DM_Taccap/urdf/rebot_b601_dm_taccap.urdf` for DM or `assets/RS_Taccap/urdf/rebot_b601_rs_taccap_v2_gripper.urdf` for RS. Both use `taccap_eef_link` automatically, so YAML recipes can omit `urdf_path` and `end_frame`. The models retain their own arm geometry, joint directions, and limits. See the [DM TacCap model notes](rebot_rt/assets/DM_Taccap/README.md) for mounting and the self-contained mesh layout. Direct native `rebot_rt.Robot` calls still require a URDF path; automatic selection belongs to the LeRobot adapter.
+For RS set `motor_family="rs", channel="can0"` (family names are case insensitive). Without a TacCap gripper, DM uses `assets/DM/urdf/ReBot_Arm_DM.urdf` and its `end_link` frame; RS uses `assets/RS/urdf/ReBot_Arm_RS.urdf` and its `gripper_end` frame. With `gripper.type: taccap_follower`, the updated `lerobot-xense` adapter selects `assets/DM_TacCap00/urdf/rebot_b601_dm_taccap_v1_gripper.urdf` for DM or `assets/RS_TacCap05/urdf/rebot_b601_rs_taccap_v2_gripper.urdf` for RS. DM uses the identified v1 TacCap00 assembly; RS retains its v2 TacCap05 assembly. Both use `taccap_eef_link` automatically, so YAML recipes can omit `urdf_path` and `end_frame`. The models retain their own arm geometry, joint directions, and limits. See the [DM TacCap model notes](rebot_rt/assets/DM_TacCap00/README.md) for mounting and the self-contained mesh layout. Direct native `rebot_rt.Robot` calls still require a URDF path; automatic selection belongs to the LeRobot adapter.
 
 LeRobot defaults to `control_mode="pos_vel"`, following the position/velocity loop used by `rebotarm_control_rt`'s `ArmEndPos`. The six arm motors use the reference package's DM/RS position and velocity gains; the native CAN gripper retains MIT mode and its separate gains. DM uses POS_VEL mode 2 and CAN ID `0x100 + motor_id`. RS uses streaming CSP mode 5 with `limit_spd`/`loc_ref` (`0x7017`/`0x7016`), as specified in the [RobStride protocol](https://github.com/RobStride/Python_Sample/blob/main/robstride_dynamics/protocol.py). The reference wrapper selected PP mode 1 while writing CSP speed parameters; this controller pairs the streaming mode and speed parameter explicitly. The native cycle remains 100 Hz and the speed limit remains 0.5 rad/s by default, rather than copying the reference's 500 Hz and higher speed limits. Set `control_mode="mit"` to use MIT instead. Direct `rebot_rt.Robot` calls retain their original default of `"mit"`; pass `control_mode="pos_vel"` explicitly when using that API.
 
@@ -103,11 +103,17 @@ config.motor_configs = [
 
 For direct pybind use, call `rebot_rt.default_motor_configs(family)` and then edit each `MotorConfig` before constructing `Robot`. Use `config.set_model(family, model_name)` to update the model's protocol ranges together.
 
+DM connection reads PMAX, VMAX and TMAX (registers 21–23) while the motors are disabled and
+compares them with the selected `MotorConfig`, as the identification driver does. A mismatch
+or failed read prevents enabling; the error identifies the motor and setting. These range
+registers are never rewritten automatically. The MIT torque field and feedback decoding must
+use the same ranges as the motor firmware.
+
 ## MIT gravity feedforward
 
 Gravity compensation is opt-in and leaves Kp, Kd, position interpolation, and fault handling unchanged.
 The native worker evaluates Pinocchio's `computeGeneralizedGravity` at the **measured** six joint
-angles every 10 ms. The torque sent in the MIT feedforward field is the scaled model torque,
+angles every 10 ms. The torque sent in the MIT feedforward field is `scale * (g(q) + torque_offsets_nm)`,
 clipped per joint and slew-limited from zero at each `start()`. Motor `direction` applies to
 torque as well as position/velocity. The seventh CAN gripper receives no gravity feedforward.
 
@@ -126,27 +132,42 @@ gravity_nm = robot.gravity_torques([0, 0.8, 0.8, -0.5, 0, 0, 0])
 
 LeRobot exposes `gravity_compensation_scale` (default `0.0`), `gravity_torque_limits_nm`
 (six explicit nonnegative values required when enabled), `gravity_slew_rate_nm_s` (default `5.0`),
-and `gravity_vector` (default `[0, 0, -9.81]`). Set them under the single arm or each dual-arm config.
+`gravity_vector` (default `[0, 0, -9.81]`), and `gravity_use_joint_offsets` (default `false`).
+When offsets are enabled, the adapter requires the URDF's matching `_offset.yaml`, validates six
+named finite biases, and passes them to the native controller before connecting. Native callers
+can pass `torque_offsets_nm=[b1, ..., b6]` directly to `configure_gravity_compensation`; omitted
+offsets default to zero. Set the LeRobot options under the single arm or each dual-arm config.
 Nonzero compensation requires `control_mode: mit`. A zero joint cap disables that joint's FF.
-The RS TacCap dual-arm recipes start at `0.5` for initial hardware comparison; increase toward
-`1.0` only after checking direction and static tracking at multiple poses. Keep speed low for
-that check. Scale and caps limit the **feedforward term**, not the total motor PD+FF torque,
+The DM TacCap00 recipes use scale `1.0`, the exported holding biases, and gravity
+`[0, 0, -9.80665]`. Their FF caps are `[1, 22, 12, 4, 2, 1]` N m; the command speed remains
+0.5 rad/s. RS TacCap05 recipes retain their existing settings. Verify direction and static
+tracking at multiple poses on the physical assembly. Scale and caps limit the **feedforward term**, not the total motor PD+FF torque,
 and do not establish a safe contact force or a continuous thermal rating.
 
 For upright, level-mounted bases, the bundled RS TacCap model already includes the adapter and
 TacCap (about 0.692 kg); do not add that mass again. Fingers are fixed at their neutral pose in
 the reduced model. Additional tools, grasped objects, a different mount, and model inaccuracies
 require corresponding model/gravity-vector validation. This implementation does not compensate
-friction, acceleration, or contact forces, and does not automatically load identified torque biases.
+friction, acceleration, or contact forces. Identified holding biases are constant offsets,
+not a full friction model. The DM TacCap00 export already includes its C1 + payload mass
+(about 0.984 kg); see [model notes](rebot_rt/assets/DM_TacCap00/README.md).
 
 Startup, A-button reset, exit return, and command-watchdog hold all retain compensation.
 Stale feedback, transport errors, and reported motor faults still stop and disable the motors;
 there is no automatic fault clearing during motion. Gravity compensation cannot prevent all
 contact-induced trips. `State.gravity_torque` reports the unscaled model estimate,
-`State.mit_command_torque` the applied FF before motor direction/quantization, and
+`State.mit_command_torque` the applied FF including offsets before motor direction/quantization, and
 `State.gravity_torque_limited` flags amplitude clipping (not slew limiting).
 LeRobot's `trace_joint_tracking` includes these values when compensation is enabled.
 Observed positions remain encoder-derived.
+
+While a LeRobot reset is waiting, its two-second status log includes gravity, applied FF,
+feedback torque/velocity, and the estimated PD and total requested torques, even with
+`trace_joint_tracking: false` and before the teleop observation loop starts. The PD estimate
+uses the configured Kp/Kd and the sent joint command; it excludes protocol quantization and
+motor current limiting. Motor feedback torque is not an independent load measurement.
+Use these diagnostics to investigate a measured position that stops outside tolerance;
+loading an identified model alone does not establish the cause of a remaining tracking error.
 
 Rebuild the checkout used by the interpreter after updating the library. With the independent
 checkout on this workstation:

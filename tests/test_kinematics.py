@@ -15,13 +15,13 @@ class TestKinematics(unittest.TestCase):
         names = {
             "DM": "ReBot_Arm_DM.urdf",
             "RS": "ReBot_Arm_RS.urdf",
-            "DM_Taccap": "rebot_b601_dm_taccap.urdf",
-            "RS_Taccap": "rebot_b601_rs_taccap_v2_gripper.urdf",
+            "DM_TacCap00": "rebot_b601_dm_taccap_v1_gripper.urdf",
+            "RS_TacCap05": "rebot_b601_rs_taccap_v2_gripper.urdf",
         }
         return assets / model / "urdf" / names[model]
 
     def test_bundled_urdfs_have_all_meshes(self):
-        for model in ("DM", "RS", "DM_Taccap", "RS_Taccap"):
+        for model in ("DM", "RS", "DM_TacCap00", "RS_TacCap05"):
             with self.subTest(model=model):
                 urdf = self.bundled_urdf(model)
                 self.assertTrue(urdf.is_file(), urdf)
@@ -56,7 +56,7 @@ class TestKinematics(unittest.TestCase):
             rebot_rt.Robot(rebot_rt.Family.DM, "can0", str(urdf), "missing_frame")
 
     def test_invalid_queued_pose_does_not_replace_a_valid_waypoint(self):
-        robot = rebot_rt.Robot(rebot_rt.Family.RS, "unused", str(self.bundled_urdf("RS_Taccap")),
+        robot = rebot_rt.Robot(rebot_rt.Family.RS, "unused", str(self.bundled_urdf("RS_TacCap05")),
                                has_gripper=False)
         pose = robot.forward_kinematics([0] * 7)
         sequence = robot.queue_target_pose(pose)
@@ -68,7 +68,7 @@ class TestKinematics(unittest.TestCase):
             self.assertEqual(robot.get_state().cartesian_sequence, sequence)
 
     def test_command_speed_override_cannot_bypass_the_robot_limit(self):
-        robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_Taccap")),
+        robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_TacCap05")),
                                has_gripper=False, max_joint_speed=1.5)
         previous = robot.get_target_joints()
         goal = [0.2, 0.1, 0.05, 0, 0, 0, 0]
@@ -80,7 +80,7 @@ class TestKinematics(unittest.TestCase):
         self.assertEqual(robot.get_target_joints(), goal)
 
     def test_taccap_export_uses_eef_frame_by_default(self):
-        urdf = self.bundled_urdf("RS_Taccap")
+        urdf = self.bundled_urdf("RS_TacCap05")
         for family in (rebot_rt.Family.DM, rebot_rt.Family.RS):
             with self.subTest(family=family):
                 implicit = rebot_rt.Robot(family, "can0", str(urdf), has_gripper=False)
@@ -97,7 +97,7 @@ class TestKinematics(unittest.TestCase):
             rebot_rt.Family.DM, "unused", str(self.bundled_urdf("DM")),
             end_frame="link6", has_gripper=False,
         )
-        urdf = str(self.bundled_urdf("DM_Taccap"))
+        urdf = str(self.bundled_urdf("DM_TacCap00"))
         wrist = rebot_rt.Robot(
             rebot_rt.Family.DM, "unused", urdf, end_frame="link6", has_gripper=False,
         )
@@ -132,7 +132,7 @@ class TestKinematics(unittest.TestCase):
                 tool.set_target_joints(invalid)
 
     def test_per_joint_limits_validation_and_scalar_override(self):
-        urdf = str(self.bundled_urdf("RS_Taccap"))
+        urdf = str(self.bundled_urdf("RS_TacCap05"))
         for limits in ([1] * 5, [1] * 7, [0] * 6, [-1] * 6, [float("nan")] * 6, [float("inf")] * 6):
             with self.subTest(limits=limits), self.assertRaisesRegex(ValueError, "max_joint_speeds"):
                 rebot_rt.Robot(rebot_rt.Family.RS, "unused", urdf, max_joint_speeds=limits)
@@ -146,7 +146,7 @@ class TestKinematics(unittest.TestCase):
             robot.set_target_joints([0] * 7, max_joint_speed=1.2)
 
     def test_pose_below_zero_joint_limits_is_rejected_without_changing_command(self):
-        robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_Taccap")),
+        robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_TacCap05")),
                                has_gripper=False)
         # Recorded mechPos values: joints 2/3 slightly below the URDF's zero
         # minima. This is a constrained IK failure, not a rotation conversion bug.

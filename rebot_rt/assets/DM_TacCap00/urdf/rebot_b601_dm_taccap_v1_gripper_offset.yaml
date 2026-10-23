@@ -1,0 +1,9 @@
+# rebot_taccap_identification joint offsets, 2026-10-23 10:06, from rebot_b601_dm_identified_v1.urdf + payload gripper (last joint refitted)
+# holding torque = URDF gravity + offset  [N·m]
+joints:
+  joint1: {offset: 0.08083891458}
+  joint2: {offset: 0.02049686659}
+  joint3: {offset: -0.05986744802}
+  joint4: {offset: 0.05837195786}
+  joint5: {offset: -0.008452037538}
+  joint6: {offset: -0.01073598411}

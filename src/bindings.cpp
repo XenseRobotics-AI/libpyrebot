@@ -97,7 +97,8 @@ PYBIND11_MODULE(_native, m) {
       .def("hold_position", &Robot::hold_position)
       .def("configure_gravity_compensation", &Robot::configure_gravity_compensation,
            py::arg("scale"), py::arg("torque_limits_nm"), py::arg("slew_rate_nm_s") = 5.0,
-           py::arg("gravity") = Eigen::Vector3d(0, 0, -9.81))
+           py::arg("gravity") = Eigen::Vector3d(0, 0, -9.81),
+           py::arg("torque_offsets_nm") = std::vector<double>{})
       .def("gravity_torques", &Robot::gravity_torques, py::arg("q"))
       .def("set_target_pose", &Robot::set_target_pose, py::arg("pose"),
            py::arg("gripper") = 0.0, py::call_guard<py::gil_scoped_release>())
