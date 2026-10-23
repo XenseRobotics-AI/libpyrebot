@@ -145,6 +145,20 @@ class TestKinematics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_joint_speed"):
             robot.set_target_joints([0] * 7, max_joint_speed=1.2)
 
+    def test_cartesian_speed_validation_and_synchronous_bypass_rejected(self):
+        for family, model in ((rebot_rt.Family.DM, "DM_TacCap00"), (rebot_rt.Family.RS, "RS_TacCap05")):
+            urdf = str(self.bundled_urdf(model))
+            for name in ("max_cartesian_linear_speed", "max_cartesian_angular_speed"):
+                for value in (-1, float("nan"), float("inf")):
+                    with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                        rebot_rt.Robot(family, "unused", urdf, **{name: value})
+                robot = rebot_rt.Robot(family, "unused", urdf, has_gripper=False, **{name: 1.0})
+                with self.assertRaisesRegex(RuntimeError, "queue_target_pose"):
+                    robot.set_target_pose(robot.forward_kinematics([0] * 7))
+                # Queue and joint/reset APIs remain available without connecting.
+                robot.queue_target_pose(robot.forward_kinematics([0] * 7))
+                robot.set_target_joints([0] * 7, max_joint_speed=0.2)
+
     def test_pose_below_zero_joint_limits_is_rejected_without_changing_command(self):
         robot = rebot_rt.Robot(rebot_rt.Family.RS, "can0", str(self.bundled_urdf("RS_TacCap05")),
                                has_gripper=False)

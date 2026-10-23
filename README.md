@@ -109,6 +109,34 @@ or failed read prevents enabling; the error identifies the motor and setting. Th
 registers are never rewritten automatically. The MIT torque field and feedback decoding must
 use the same ranges as the motor firmware.
 
+### TCP speed limits
+
+DM and RS share the same Cartesian queue and joint coordination. LeRobot's
+`max_cartesian_linear_speed` (m/s) and `max_cartesian_angular_speed` (rad/s) limit
+the **commanded TCP trajectory** in that queue. The DM recipes use 1.0 m/s and
+6.28 rad/s, with joint caps of 1.5 rad/s. These are upper bounds, not guaranteed
+travel speeds. Joint constraints can slow the whole TCP step further.
+
+At each 10 ms tick, the controller computes FK of the last sent joint command,
+then caps the next translation and shortest-path rotation with one common
+fraction. Coordinated IK applies the joint bounds, and a final FK check rejects
+steps exceeding either TCP cap, including boundary fallback steps. This covers
+the first target and catch-up after streaming updates. Solving a capped sample
+does not mark the final goal complete; the producer must keep publishing to
+satisfy the existing watchdog. Reset and direct joint moves retain their own
+joint-speed limits.
+
+Both fields default to `None` in LeRobot (disabled); the native `Robot`
+constructor accepts the same keywords, defaulting to `0` (disabled). Configured
+limits require `interpolate_cartesian_targets: true`; the native synchronous
+`set_target_pose()` rejects use with these limits to prevent a silent bypass.
+Pico's `teleop.max_pos_velocity` / `max_rot_velocity` remain upstream target
+filters. They do not replace these robot-side limits. The new trace field
+`tcp_speed_scale` (`State.cartesian_speed_scale`) reports the common TCP speed
+fraction before joint coordination; `tcp_step_scale` reports the subsequent
+IK fraction. These limits govern discrete commands, not measured motor speed,
+and do not add acceleration or jerk limits.
+
 ## MIT gravity feedforward
 
 Gravity compensation is opt-in and leaves Kp, Kd, position interpolation, and fault handling unchanged.

@@ -76,6 +76,7 @@ struct State {
   bool cartesian_tracking_progress = false; // a feasible error-reducing step was accepted
   bool cartesian_coordinated = false; // sampled Cartesian direction preserved within IK tolerance
   double cartesian_step_scale = 0.0;  // fraction of this tick's Cartesian sample; 0 for fallback
+  double cartesian_speed_scale = 1.0; // common translation/rotation speed cap, before joint coordination
   int cartesian_limiting_joint = -1;  // zero-based joint bounding the linearized step, -1 if none
   double cartesian_ik_error = 0.0;
   double cartesian_duration_sec = 0.01;
@@ -99,7 +100,8 @@ public:
         uint32_t dm_serial_baud = 921600,
         std::vector<MotorConfig> motor_configs = {},
         std::string control_mode = "mit", bool mit_velocity_feedforward = true,
-        std::vector<double> max_joint_speeds = {}, bool coordinate_cartesian_speed = true);
+        std::vector<double> max_joint_speeds = {}, bool coordinate_cartesian_speed = true,
+        double max_cartesian_linear_speed = 0.0, double max_cartesian_angular_speed = 0.0);
   ~Robot();
   Robot(const Robot&) = delete;
   Robot& operator=(const Robot&) = delete;
@@ -162,6 +164,8 @@ private:
   JointArray joint_speed_limits_{};
   JointArray target_speed_limits_{};
   bool coordinate_cartesian_speed_;
+  double max_cartesian_linear_speed_;  // m/s; zero disables this queue limit
+  double max_cartesian_angular_speed_; // rad/s; zero disables this queue limit
   double command_timeout_sec_;
   uint32_t dm_serial_baud_;
   rebotarm::RobotModel model_;

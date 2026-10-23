@@ -49,16 +49,36 @@ finally:
     robot.close()
 '''
 
-    def run_cartesian(self, body, mode, feedforward=True, speeds=None, initial_q=None, coordinated=True):
+    def run_cartesian(self, body, mode, feedforward=True, speeds=None, initial_q=None, coordinated=True,
+                      linear_speed=0.0, angular_speed=0.0):
         return self.run_native(
             script=self.CARTESIAN_SCRIPT.replace("    BODY", body).replace(
                 "command_timeout_sec=0.3)",
                 f"command_timeout_sec=0.3, max_joint_speeds={speeds or []!r}, "
-                f"coordinate_cartesian_speed={coordinated!r})"), control_mode=mode,
+                f"coordinate_cartesian_speed={coordinated!r}, max_cartesian_linear_speed={linear_speed}, "
+                f"max_cartesian_angular_speed={angular_speed})"), control_mode=mode,
             initial_q=initial_q or [0.15, 0.6, 0.5, -0.25, 0.2, 0.1],
             active_report_type=24, reply_status=False,
             feedforward=feedforward,
         )
+
+    def test_cartesian_speed_caps_preserve_coupled_motion_and_watchdog(self):
+        for mode in ("mit", "pos_vel"):
+            for linear, angular in ((0.015, 0.5), (0.2, 0.12)):
+                with self.subTest(mode=mode, linear=linear, angular=angular):
+                    body = f'''
+    import sys
+    sys.path.insert(0, {str(Path(__file__).parent)!r})
+    from cartesian_speed_checks import check_cartesian_speed_limits
+    check_cartesian_speed_limits(robot, {linear}, {angular})
+'''
+                    result, _, _ = self.run_cartesian(
+                        body, mode, feedforward=False,
+                        speeds=[0.3, 1.5, 1.5, 1.5, 0.6, 1.5],
+                        initial_q=[0.2193, 0.4063, 0.3952, -0.0846, 0.0668, -0.1274],
+                        linear_speed=linear, angular_speed=angular,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_cartesian_mit_dq_can_be_zero_with_the_position_ramp_still_moving(self):
         for mode in ("mit", "pos_vel"):

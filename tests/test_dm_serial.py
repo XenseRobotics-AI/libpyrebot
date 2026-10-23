@@ -88,6 +88,26 @@ class FakeDamiaoBridge:
 
 
 class TestDmSerial(unittest.TestCase):
+    def test_cartesian_speed_caps_preserve_coupled_motion_and_watchdog(self):
+        from cartesian_speed_checks import check_cartesian_speed_limits
+        urdf = Path(rebot_rt.__file__).parent / "assets/DM_TacCap00/urdf/rebot_b601_dm_taccap_v1_gripper.urdf"
+        for mode in ("mit", "pos_vel"):
+            for linear, angular in ((0.015, 0.5), (0.2, 0.12)):
+                with self.subTest(mode=mode, linear=linear, angular=angular):
+                    bridge = FakeDamiaoBridge(positions=[0.2, -0.8, -0.7, 0.4, 0.15, -0.1, 0])
+                    robot = rebot_rt.Robot(
+                        rebot_rt.Family.DM, bridge.port, str(urdf), has_gripper=False, control_mode=mode,
+                        max_joint_speeds=[0.3, 1.5, 1.5, 1.5, 0.6, 1.5], command_timeout_sec=0.3,
+                        max_cartesian_linear_speed=linear, max_cartesian_angular_speed=angular,
+                    )
+                    try:
+                        robot.connect()
+                        robot.start()
+                        check_cartesian_speed_limits(robot, linear, angular)
+                    finally:
+                        robot.close()
+                        bridge.close()
+
     def test_range_read_retries_are_bounded_and_never_enable_on_failure(self):
         urdf = Path(rebot_rt.__file__).parent / "assets/DM_TacCap00/urdf/rebot_b601_dm_taccap_v1_gripper.urdf"
         for drops in (1, 3):

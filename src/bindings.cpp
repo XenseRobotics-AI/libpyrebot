@@ -47,6 +47,7 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("joint_step_scale", &State::joint_step_scale)
       .def_readonly("cartesian_coordinated", &State::cartesian_coordinated)
       .def_readonly("cartesian_step_scale", &State::cartesian_step_scale)
+      .def_readonly("cartesian_speed_scale", &State::cartesian_speed_scale)
       .def_readonly("cartesian_limiting_joint", &State::cartesian_limiting_joint)
       .def_readonly("fresh", &State::fresh)
       .def_readonly("feedback_age_sec", &State::feedback_age_sec)
@@ -76,14 +77,15 @@ PYBIND11_MODULE(_native, m) {
       .def_readonly("target", &IKStatus::target);
   py::class_<Robot>(m, "Robot")
       .def(py::init<Family, std::string, std::string, std::string, bool, double, double, uint32_t,
-                    std::vector<MotorConfig>, std::string, bool, std::vector<double>, bool>(),
+                    std::vector<MotorConfig>, std::string, bool, std::vector<double>, bool, double, double>(),
            py::arg("family"), py::arg("channel"), py::arg("urdf_path"),
            py::arg("end_frame") = "", py::arg("has_gripper") = true,
            py::arg("max_joint_speed") = 0.5, py::arg("command_timeout_sec") = 0.5,
            py::arg("dm_serial_baud") = 921600,
            py::arg("motor_configs") = std::vector<MotorConfig>{},
            py::arg("control_mode") = "mit", py::arg("mit_velocity_feedforward") = true,
-           py::arg("max_joint_speeds") = std::vector<double>{}, py::arg("coordinate_cartesian_speed") = true)
+           py::arg("max_joint_speeds") = std::vector<double>{}, py::arg("coordinate_cartesian_speed") = true,
+           py::arg("max_cartesian_linear_speed") = 0.0, py::arg("max_cartesian_angular_speed") = 0.0)
       .def("connect", &Robot::connect, py::call_guard<py::gil_scoped_release>())
       .def("start", &Robot::start, py::call_guard<py::gil_scoped_release>())
       .def("stop", &Robot::stop, py::call_guard<py::gil_scoped_release>())

@@ -184,11 +184,14 @@ Robot::Robot(Family family, std::string channel, std::string urdf_path,
              std::string end_frame, bool has_gripper, double max_joint_speed,
              double command_timeout_sec, uint32_t dm_serial_baud,
              std::vector<MotorConfig> motor_configs, std::string control_mode, bool mit_velocity_feedforward,
-             std::vector<double> max_joint_speeds, bool coordinate_cartesian_speed)
+             std::vector<double> max_joint_speeds, bool coordinate_cartesian_speed,
+             double max_cartesian_linear_speed, double max_cartesian_angular_speed)
     : family_(family), control_mode_(std::move(control_mode)), mit_velocity_feedforward_(mit_velocity_feedforward),
       channel_(std::move(channel)), end_frame_(std::move(end_frame)),
       has_gripper_(has_gripper), max_joint_speed_(max_joint_speed),
       coordinate_cartesian_speed_(coordinate_cartesian_speed),
+      max_cartesian_linear_speed_(max_cartesian_linear_speed),
+      max_cartesian_angular_speed_(max_cartesian_angular_speed),
       command_timeout_sec_(command_timeout_sec), dm_serial_baud_(dm_serial_baud), model_(urdf_path),
       frame_id_(end_frame_.empty() ? model_.end_effector_frame_id() : model_.frame_id(end_frame_)) {
   if (channel_.empty()) throw std::invalid_argument("channel must not be empty");
@@ -205,6 +208,9 @@ Robot::Robot(Family family, std::string channel, std::string urdf_path,
     throw std::invalid_argument("speed and timeout must be finite and positive");
   if (!motor_configs.empty() && motor_configs.size() != kMotorCount)
     throw std::invalid_argument("motor_configs must contain exactly seven motors");
+  if (!std::isfinite(max_cartesian_linear_speed_) || max_cartesian_linear_speed_ < 0 ||
+      !std::isfinite(max_cartesian_angular_speed_) || max_cartesian_angular_speed_ < 0)
+    throw std::invalid_argument("Cartesian speed limits must be finite and nonnegative (0 disables)");
   if (!max_joint_speeds.empty() && max_joint_speeds.size() != kArmDof)
     throw std::invalid_argument("max_joint_speeds must contain exactly six finite positive speeds");
   joint_speed_limits_.fill(max_joint_speed_);
@@ -507,6 +513,8 @@ Eigen::VectorXd Robot::model_q(const JointArray& q) const {
 }
 
 IKStatus Robot::set_target_pose(const Eigen::Matrix4d& pose, double gripper) {
+  if (max_cartesian_linear_speed_ > 0 || max_cartesian_angular_speed_ > 0)
+    throw std::runtime_error("Cartesian speed limits require queue_target_pose(), not synchronous set_target_pose()");
   if (!pose.allFinite() || !valid_rotation(pose.block<3, 3>(0, 0)) ||
       (pose.row(3) - Eigen::RowVector4d(0, 0, 0, 1)).norm() > 1e-6)
     throw std::invalid_argument("target must be a finite rigid 4x4 transform");
@@ -540,6 +548,7 @@ void Robot::cancel_cartesian_locked() {
   state_.cartesian_tracking_progress = false;
   state_.cartesian_coordinated = false;
   state_.cartesian_step_scale = 0.0;
+  state_.cartesian_speed_scale = 1.0;
   state_.cartesian_limiting_joint = -1;
   // Invalidate an IK solve already in flight before a reset/hold/new session.
   ++state_.cartesian_sequence;
@@ -593,11 +602,14 @@ void Robot::update_cartesian_target() {
   const double alpha = std::clamp(
       (std::chrono::duration<double>(now - started).count() + 0.01) / duration, 0.0, 1.0);
   rebotarm::IKResult result;
+  double speed_scale = 1.0;
+  const bool speed_capped = max_cartesian_linear_speed_ > 0 || max_cartesian_angular_speed_ > 0;
   {
     // Never hold the command mutex during FK/IK: A/reset/hold can invalidate
     // this generation while it is being solved, and get_state stays responsive.
     std::lock_guard<std::mutex> model_lock(model_mutex_);
-    if (new_segment) start = std::get<2>(model_.fk(model_q(seed), end_frame_));
+    const Eigen::Matrix4d current = std::get<2>(model_.fk(model_q(seed), end_frame_));
+    if (new_segment) start = current;
     Eigen::Matrix4d sample = Eigen::Matrix4d::Identity();
     sample.block<3, 1>(0, 3) = start.block<3, 1>(0, 3) +
         alpha * (goal.block<3, 1>(0, 3) - start.block<3, 1>(0, 3));
@@ -606,9 +618,30 @@ void Robot::update_cartesian_target() {
     to.normalize();
     if (from.dot(to) < 0.0) to.coeffs() *= -1.0;
     sample.block<3, 3>(0, 0) = from.slerp(alpha, to).normalized().toRotationMatrix();
+    // Limit from FK(last sent command), including the first target and backlog
+    // after a producer update. One scale preserves the translation/rotation ratio.
+    // Producer timing alone cannot bound the speed of a catch-up step.
+    const Eigen::Vector3d translation = sample.block<3, 1>(0, 3) - current.block<3, 1>(0, 3);
+    const Eigen::Quaterniond current_rotation(current.block<3, 3>(0, 0));
+    const Eigen::Quaterniond sample_rotation(sample.block<3, 3>(0, 0));
+    const double angle = current_rotation.angularDistance(sample_rotation);
+    if (max_cartesian_linear_speed_ > 0 && translation.norm() > 0)
+      speed_scale = std::min(speed_scale, max_cartesian_linear_speed_ * 0.01 / translation.norm());
+    if (max_cartesian_angular_speed_ > 0 && angle > 0)
+      speed_scale = std::min(speed_scale, max_cartesian_angular_speed_ * 0.01 / angle);
+    if (speed_scale < 1.0) {
+      speed_scale *= 0.999;  // leave a small margin for numerical IK error
+      sample.block<3, 1>(0, 3) = current.block<3, 1>(0, 3) + speed_scale * translation;
+      sample.block<3, 3>(0, 0) = current_rotation.slerp(speed_scale, sample_rotation).normalized().toRotationMatrix();
+    }
     rebotarm::IKParams params;
     params.max_iter = 40;
     params.tolerance = 1e-4;
+    // Small speed limits must not make every substep fall inside the IK deadband.
+    if (max_cartesian_linear_speed_ > 0)
+      params.tolerance = std::min(params.tolerance, max_cartesian_linear_speed_ * 0.01 * 1e-3);
+    if (max_cartesian_angular_speed_ > 0)
+      params.tolerance = std::min(params.tolerance, max_cartesian_angular_speed_ * 0.01 * 1e-3);
     params.damping = 1e-4;
     params.max_time_sec = 0.003;  // Reserve the rest of the 10 ms cycle for CAN and feedback.
     const Eigen::VectorXd q_seed = model_q(seed);
@@ -621,6 +654,19 @@ void Robot::update_cartesian_target() {
     result = coordinate_cartesian_speed_
         ? model_.solve_coordinated_tracking_ik(sample, q_seed, frame_id_, lower, upper, params)
         : model_.solve_tracking_ik(sample, q_seed, frame_id_, lower, upper, params);
+    if (speed_capped && result.q.allFinite() && (result.success || result.progress)) {
+      // Bounded IK can fall back near a singularity/workspace boundary. Verify
+      // its actual FK step too; an error-reducing solution may exceed a TCP cap.
+      const Eigen::Matrix4d reached = std::get<2>(model_.fk(result.q, end_frame_));
+      const double distance = (reached.block<3, 1>(0, 3) - current.block<3, 1>(0, 3)).norm();
+      const double rotation = current_rotation.angularDistance(Eigen::Quaterniond(reached.block<3, 3>(0, 0)));
+      if ((max_cartesian_linear_speed_ > 0 && distance > max_cartesian_linear_speed_ * 0.01 + 1e-9) ||
+          (max_cartesian_angular_speed_ > 0 && rotation > max_cartesian_angular_speed_ * 0.01 + 1e-9)) {
+        result.q = q_seed;
+        result.success = result.progress = result.coordinated = false;
+        result.step_scale = speed_scale = 0.0;
+      }
+    }
   }
   std::lock_guard<std::mutex> lock(mutex_);
   if (!cartesian_enabled_ || state_.cartesian_sequence != sequence || state_.fault ||
@@ -628,10 +674,11 @@ void Robot::update_cartesian_target() {
   state_.cartesian_consumed_sequence = sequence;
   state_.cartesian_ik_valid = true;
   state_.cartesian_ik_success = result.success;
-  state_.cartesian_tracking_limited = !result.success;
+  state_.cartesian_tracking_limited = speed_scale < 1.0 || !result.success;
   state_.cartesian_tracking_progress = result.progress;
   state_.cartesian_coordinated = result.coordinated;
   state_.cartesian_step_scale = result.step_scale;
+  state_.cartesian_speed_scale = speed_scale;
   state_.cartesian_limiting_joint = result.limiting_joint;
   state_.cartesian_ik_error = result.error;
   ++state_.cartesian_ik_solves;
@@ -642,7 +689,7 @@ void Robot::update_cartesian_target() {
     // No feasible descent this tick: hold the arm, but keep the segment alive
     // until its endpoint. A later sample may move inward or along a boundary.
     for (int i = 0; i < kArmDof; ++i) target_[i] = sent_[i];
-    cartesian_endpoint_ = alpha >= 1.0;
+    cartesian_endpoint_ = alpha >= 1.0 && speed_scale == 1.0;
     return;
   }
   if (!result.q.allFinite()) {
@@ -657,7 +704,7 @@ void Robot::update_cartesian_target() {
   target_speed_limits_ = joint_speed_limits_;
   // A partial local solution is a step toward the endpoint, not completion.
   // Continue with the same waypoint until convergence, no progress, or timeout.
-  cartesian_endpoint_ = alpha >= 1.0 && result.success;
+  cartesian_endpoint_ = alpha >= 1.0 && speed_scale == 1.0 && result.success;
 }
 
 Eigen::Matrix4d Robot::forward_kinematics() const { return forward_kinematics(get_state().q); }
